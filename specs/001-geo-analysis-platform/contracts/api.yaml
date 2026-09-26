@@ -1,0 +1,735 @@
+openapi: 3.1.0
+info:
+  title: GlISt Geo Analysis API
+  version: 1.0.0
+  description: |
+    REST API базовой платформы геопространственного анализа (фича `001-geo-analysis-platform`).
+    Все координаты — EPSG:4326; геометрические операции выполняются средствами PostGIS.
+    Аутентификация отложена вместе с отдельной фичей (см. plan.md → Complexity Tracking): эндпоинты
+    принимают заголовок `Authorization: Bearer <JWT>`, который в этой фиче проверяется заглушкой
+    `get_current_user`, возвращающей единственного локального пользователя.
+servers:
+  - url: http://localhost:8000
+    description: Локальный стенд разработки (docker compose)
+
+tags:
+  - name: queries
+    description: Запросы на естественном языке, уточнения и альтернативы
+  - name: runs
+    description: Запуски анализа, этапы, проверка, трассировка
+  - name: exports
+    description: Экспорт результата в PDF и GeoJSON
+  - name: system
+    description: Состояние сервиса и очереди
+
+paths:
+  /api/v1/health:
+    get:
+      tags: [system]
+      summary: Проверка доступности API и зависимостей
+      operationId: getHealth
+      responses:
+        "200":
+          description: Сервис доступен
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+
+  /api/v1/queries:
+    post:
+      tags: [queries]
+      summary: Создать запрос на естественном языке
+      description: |
+        Создаёт запрос, извлекает территорию, период и тип анализа (FR-002). Если извлечение
+        неоднозначно — создаётся уточняющий вопрос и запуск не стартует (FR-002). Если предыдущий
+        анализ ещё выполняется, запуск ставится в очередь (FR-021, SC-012).
+      operationId: createQuery
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/QueryCreate"
+      responses:
+        "201":
+          description: Запрос создан; запуск создан и поставлен в очередь или ожидает ответа на уточнение
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryCreated"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+    get:
+      tags: [queries]
+      summary: История запросов
+      description: Список запросов пользователя с датами и статусами (US2, FR-013).
+      operationId: listQueries
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: Страница истории
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryPage"
+
+  /api/v1/queries/{queryId}:
+    get:
+      tags: [queries]
+      summary: Карточка запроса с цепочкой уточнений
+      operationId: getQuery
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/QueryId"
+      responses:
+        "200":
+          description: Запрос найден
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/clarifications/{clarificationId}/answer:
+    post:
+      tags: [queries]
+      summary: Ответить на уточняющий вопрос или выбрать альтернативу
+      description: |
+        Для `kind = ambiguity` — уточняет территорию/период (FR-002). Для `kind = no_data_alternatives` —
+        выбирает один из предложенных вариантов (другой период, другой источник, ближайшая дата) и
+        продолжает обработку без повторного ввода запроса (FR-015, SC-008).
+      operationId: answerClarification
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: clarificationId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClarificationAnswer"
+      responses:
+        "200":
+          description: Ответ принят; запуск продолжен или создан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClarificationRequest"
+        "409":
+          description: Уточнение уже отвечено или истекло
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /api/v1/runs/{runId}:
+    get:
+      tags: [runs]
+      summary: Состояние запуска
+      operationId: getRun
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Состояние запуска (в том числе «ожидает», «не прошёл проверку», «ошибка»)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/runs/{runId}/stages:
+    get:
+      tags: [runs]
+      summary: Этапы обработки с описаниями работы агентов
+      description: Используется для первичной отрисовки и дозапроса после обрыва WebSocket (FR-010, US4).
+      operationId: getRunStages
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Список этапов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RunStage"
+
+  /api/v1/runs/{runId}/result:
+    get:
+      tags: [runs]
+      summary: Результат анализа
+      description: |
+        Доступен для статусов «завершён» и «не прошёл проверку» (SC-011). Содержит территории,
+        статистику по классам изменений, объяснение, ссылки на источники и причины отклонений.
+      operationId: getRunResult
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Результат
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalysisResult"
+        "409":
+          description: Результат ещё не готов (запуск в очереди или в обработке)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/runs/{runId}/trace:
+    get:
+      tags: [runs]
+      summary: Ссылка на трассировку LangFuse
+      description: Возвращает идентификатор трассы, по которому восстанавливается полная последовательность шагов (FR-016, SC-005).
+      operationId: getRunTrace
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Ссылка на трассу
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TraceRef"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/runs/{runId}/pin:
+    put:
+      tags: [runs]
+      summary: Пометить запуск «сохранить навсегда»
+      description: Снимает плановую очистку тяжёлых артефактов, если она ещё не выполнена (FR-023, SC-013).
+      operationId: setRunPinned
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pinned]
+              properties:
+                pinned: { type: boolean }
+      responses:
+        "200":
+          description: Признак обновлён
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Run"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/runs/{runId}/exports:
+    post:
+      tags: [exports]
+      summary: Сформировать экспорт результата
+      description: |
+        Формирует PDF (карта, раздельные таблицы по территориям, суммарная таблица с пометкой
+        о возможном пересечении, объяснение, источники) или GeoJSON (один FeatureCollection).
+      operationId: createExport
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [format]
+              properties:
+                format:
+                  type: string
+                  enum: [pdf, geojson]
+      responses:
+        "201":
+          description: Артефакт экспорта создан
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Artifact"
+        "409":
+          description: Результат не готов или экспорт недоступен для этого статуса
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    get:
+      tags: [exports]
+      summary: Список экспортированных и производных артефактов запуска
+      operationId: listRunArtifacts
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/RunId"
+      responses:
+        "200":
+          description: Список артефактов (с признаком удаления и сроком хранения)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Artifact"
+
+  /api/v1/artifacts/{artifactId}/content:
+    get:
+      tags: [exports]
+      summary: Скачать содержимое артефакта
+      operationId: downloadArtifact
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: artifactId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Файл (PDF, GeoJSON, PNG или GeoTIFF)
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "410":
+          description: Тяжёлый артефакт удалён по политике хранения; доступны превью, GeoJSON и метаданные (FR-022)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/queue:
+    get:
+      tags: [system]
+      summary: Активный запуск и очередь ожидающих
+      description: Отображает ровно один активный анализ и список ожидающих (FR-021, SC-012, US4.3).
+      operationId: getQueue
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Состояние очереди
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueueState"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT-аутентификация отложена вместе с отдельной фичей (см. plan.md → Complexity Tracking, строка 1).
+        В этой фиче заголовок принимается и обрабатывается заглушкой `get_current_user`, возвращающей
+        единственного локального пользователя; контракт остаётся неизменным при добавлении JWT.
+
+  parameters:
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    QueryId:
+      name: queryId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    NotFound:
+      description: Ресурс не найден
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ValidationError:
+      description: Входные данные не прошли валидацию (Pydantic v2)
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+
+    Health:
+      type: object
+      required: [status, database, redis, langfuse]
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        database: { type: string, enum: [ok, unavailable] }
+        redis: { type: string, enum: [ok, unavailable] }
+        langfuse: { type: string, enum: [ok, unavailable] }
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Машинный код ошибки без внутренних деталей (Принцип IX)
+          examples: [validation_error, not_found, result_not_ready, artifact_purged, clarification_closed]
+        message: { type: string }
+        details:
+          type: array
+          items: { type: object }
+          description: Детали валидации по полям, без стектрейсов и SQL
+
+    QueryCreate:
+      type: object
+      required: [text]
+      additionalProperties: false
+      properties:
+        text:
+          type: string
+          minLength: 3
+          maxLength: 1000
+          description: Вопрос на естественном языке (русский или английский)
+        parentQueryId:
+          type: string
+          format: uuid
+          nullable: true
+          description: Предыдущий запрос для уточнения (FR-011)
+        mode:
+          type: string
+          enum: [add, replace]
+          nullable: true
+          description: Для уточняющего результата — дополнить или заменить предыдущий (FR-012)
+
+    ClarificationRequest:
+      type: object
+      required: [id, queryId, kind, questionText, options, status]
+      properties:
+        id: { type: string, format: uuid }
+        queryId: { type: string, format: uuid }
+        kind: { type: string, enum: [ambiguity, no_data_alternatives] }
+        questionText: { type: string }
+        options:
+          type: array
+          items:
+            type: object
+            required: [id, label]
+            properties:
+              id: { type: string }
+              label: { type: string }
+              description: { type: string, nullable: true }
+        status: { type: string, enum: [ожидает ответа, отвечен, истёк] }
+
+    ClarificationAnswer:
+      type: object
+      additionalProperties: false
+      properties:
+        selectedOptionId:
+          type: string
+          nullable: true
+          description: Идентификатор выбранной альтернативы (kind = no_data_alternatives)
+        text:
+          type: string
+          maxLength: 500
+          nullable: true
+          description: Свободный ответ на уточняющий вопрос (kind = ambiguity)
+
+    Run:
+      type: object
+      required: [id, queryId, status, attemptCount, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        queryId: { type: string, format: uuid }
+        parentRunId: { type: string, format: uuid, nullable: true }
+        reusedResultId: { type: string, format: uuid, nullable: true }
+        status:
+          type: string
+          enum: [ожидает, в обработке, завершён, не прошёл проверку, данные недоступны, ошибка]
+        statusReason: { type: string, nullable: true }
+        queuePosition: { type: integer, nullable: true, minimum: 1 }
+        queuedAt: { type: string, format: date-time, nullable: true }
+        startedAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
+        attemptCount:
+          type: integer
+          minimum: 0
+          maximum: 1
+          description: Число переработок (0 или 1) — FR-007
+        rejectionCategory:
+          type: string
+          enum: [analysis_error, data_quality]
+          nullable: true
+        traceId: { type: string, description: Идентификатор трассы LangFuse }
+        seed: { type: integer }
+        settingsHash: { type: string }
+        paramsHash: { type: string }
+        ragIndexVersion: { type: string }
+        isReference: { type: boolean }
+        isPinned: { type: boolean }
+        retentionUntil: { type: string, format: date-time, nullable: true }
+        purgeNoticeAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        stages:
+          type: array
+          items: { $ref: "#/components/schemas/RunStage" }
+        rejections:
+          type: array
+          items: { $ref: "#/components/schemas/ValidationRejection" }
+
+    RunStage:
+      type: object
+      required: [seq, attemptNo, agent, stageCode, title, description, status, startedAt]
+      properties:
+        seq: { type: integer, minimum: 1 }
+        attemptNo: { type: integer, minimum: 0, maximum: 1 }
+        agent: { type: string, enum: [researcher, analyst, visualizer, validator] }
+        stageCode:
+          type: string
+          examples: [data_search, composite, ndvi, landcover, change_zones, map_layers, validation]
+        title: { type: string }
+        description: { type: string, description: "Краткое описание работы агента (FR-010, US4)" }
+        status: { type: string, enum: [running, completed, failed, skipped] }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time, nullable: true }
+        details: { type: object, additionalProperties: true }
+
+    ValidationRejection:
+      type: object
+      required: [attemptNo, category, reasons, createdAt]
+      properties:
+        attemptNo: { type: integer, minimum: 1, maximum: 2 }
+        category: { type: string, enum: [analysis_error, data_quality] }
+        reasons:
+          type: array
+          minItems: 1
+          items: { type: string }
+        fixesApplied:
+          type: array
+          items: { type: string }
+          description: Что Analyst пытался исправить во второй итерации (заполняется при повторном отклонении)
+        createdAt: { type: string, format: date-time }
+
+    QueryCreated:
+      type: object
+      required: [query, run]
+      properties:
+        query: { $ref: "#/components/schemas/QuerySummary" }
+        run: { $ref: "#/components/schemas/Run" }
+        clarification:
+          allOf: [{ $ref: "#/components/schemas/ClarificationRequest" }]
+          nullable: true
+          description: Заполняется, если требуется уточнение до начала анализа (FR-002)
+
+    QuerySummary:
+      type: object
+      required: [id, text, status, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        text: { type: string }
+        language: { type: string, enum: [ru, en] }
+        queryKind: { type: string, enum: [primary, follow_up] }
+        parentQueryId: { type: string, format: uuid, nullable: true }
+        status:
+          type: string
+          enum: [ожидает, в обработке, завершён, не прошёл проверку, данные недоступны, ошибка]
+        lastRunId: { type: string, format: uuid, nullable: true }
+        queuePosition: { type: integer, nullable: true }
+        purgeNoticeAt: { type: string, format: date-time, nullable: true }
+        isPinned: { type: boolean }
+        createdAt: { type: string, format: date-time }
+
+    QueryPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/QuerySummary" }
+        nextCursor: { type: string, nullable: true }
+
+    QueryDetail:
+      type: object
+      required: [query, runs]
+      properties:
+        query: { $ref: "#/components/schemas/QuerySummary" }
+        clarification:
+          allOf: [{ $ref: "#/components/schemas/ClarificationRequest" }]
+          nullable: true
+        runs:
+          type: array
+          description: Цепочка запусков с учётом parent_run_id (FR-013)
+          items: { $ref: "#/components/schemas/Run" }
+
+    AnalysisResult:
+      type: object
+      required: [id, runId, mode, territoriesCount, crs, summaryText, explanationText, sources, validationOutcome, territories, aggregate, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        runId: { type: string, format: uuid }
+        mode: { type: string, enum: [single, combined] }
+        territoriesCount: { type: integer, minimum: 1, maximum: 5 }
+        hasOverlap:
+          type: boolean
+          description: Признак пересечения территорий — площади не считаются уникальными (решение Q4)
+        crs: { type: string, description: "Всегда EPSG:4326" }
+        summaryText: { type: string }
+        explanationText: { type: string }
+        citations:
+          type: array
+          description: Ссылки на фрагменты RAG (Принцип VII)
+          items:
+            type: object
+            required: [document, chunkOrdinal]
+            properties:
+              document: { type: string }
+              docVersion: { type: string }
+              chunkOrdinal: { type: integer }
+              uri: { type: string, nullable: true }
+        sources:
+          type: array
+          description: Источники данных и даты съёмки (FR-004, SC-004)
+          items:
+            type: object
+            required: [source, collection, sceneId, acquiredAt]
+            properties:
+              source: { type: string }
+              collection: { type: string }
+              sceneId: { type: string }
+              acquiredAt: { type: string, format: date-time }
+              cloudCover: { type: number, nullable: true }
+              resolutionM: { type: number, nullable: true }
+        validationOutcome: { type: string, enum: [passed, failed] }
+        rejections:
+          type: array
+          items: { $ref: "#/components/schemas/ValidationRejection" }
+        areasPurged:
+          type: boolean
+          description: Тяжёлые артефакты удалены по политике хранения; результат остаётся открываемым (FR-022)
+        territories:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items: { $ref: "#/components/schemas/ResultTerritory" }
+        aggregate:
+          type: object
+          required: [retained, lost, new, note]
+          properties:
+            retained: { $ref: "#/components/schemas/ChangeClassStats" }
+            lost: { $ref: "#/components/schemas/ChangeClassStats" }
+            new: { $ref: "#/components/schemas/ChangeClassStats" }
+            note:
+              type: string
+              description: Обязательная пометка о возможном пересечении территорий
+        createdAt: { type: string, format: date-time }
+
+    ResultTerritory:
+      type: object
+      required: [position, territoryName, aoiType, stats, boundary]
+      properties:
+        position: { type: integer, minimum: 1, maximum: 5 }
+        territoryName: { type: string, description: Из текста запроса либо «Область N» (FR-002) }
+        aoiType: { type: string, enum: [admin, poi, buffer] }
+        boundary:
+          type: object
+          description: Граница территории в GeoJSON, всегда EPSG:4326
+        stats:
+          type: object
+          required: [retained, lost, new]
+          properties:
+            retained: { $ref: "#/components/schemas/ChangeClassStats" }
+            lost: { $ref: "#/components/schemas/ChangeClassStats" }
+            new: { $ref: "#/components/schemas/ChangeClassStats" }
+        sourceRunId: { type: string, format: uuid, description: "Запуск, в котором территория проанализирована" }
+
+    ChangeClassStats:
+      type: object
+      required: [areaKm2, zonesCount]
+      properties:
+        areaKm2: { type: number, minimum: 0 }
+        zonesCount: { type: integer, minimum: 0 }
+
+    Artifact:
+      type: object
+      required: [id, runId, kind, sizeBytes, isHeavy, isDeleted, contentUrl, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        runId: { type: string, format: uuid }
+        kind:
+          type: string
+          enum: [preview_png, final_geotiff, geojson, pdf, raw_scene, intermediate_ndvi, intermediate_classified]
+        sizeBytes: { type: integer, format: int64 }
+        sha256: { type: string }
+        isHeavy: { type: boolean, description: "true, если размер больше 100 МБ (FR-022)" }
+        retentionUntil: { type: string, format: date-time, nullable: true, description: "null означает бессрочное хранение" }
+        purgeNoticeAt: { type: string, format: date-time, nullable: true }
+        isDeleted: { type: boolean }
+        contentUrl: { type: string, description: "Ссылка на /api/v1/artifacts/{artifactId}/content" }
+        createdAt: { type: string, format: date-time }
+
+    TraceRef:
+      type: object
+      required: [runId, traceId]
+      properties:
+        runId: { type: string, format: uuid }
+        traceId: { type: string }
+        url:
+          type: string
+          nullable: true
+          description: Ссылка на трассу в интерфейсе LangFuse (SC-005)
+
+    QueueState:
+      type: object
+      required: [activeRunId, waiting, updatedAt]
+      properties:
+        activeRunId: { type: string, format: uuid, nullable: true }
+        waiting:
+          type: array
+          description: Ожидающие запуски в порядке старта (FR-021, SC-012)
+          items:
+            type: object
+            required: [runId, queryId, position]
+            properties:
+              runId: { type: string, format: uuid }
+              queryId: { type: string, format: uuid }
+              position: { type: integer, minimum: 1 }
+        updatedAt: { type: string, format: date-time }

@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://glist.local/contracts/geojson-export.schema.json",
+  "title": "GlISt change-zones GeoJSON export",
+  "description": "Один FeatureCollection со зонами изменений всех территорий результата (FR-014). Все координаты — EPSG:4326 (WGS 84, lon/lat); проверка SRID и валидности геометрий выполняется средствами PostGIS.",
+  "type": "object",
+  "required": ["type", "crs", "properties", "features"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "FeatureCollection" },
+    "crs": {
+      "type": "object",
+      "description": "Система координат экспорта (FR-017)",
+      "required": ["type", "properties"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "name" },
+        "properties": {
+          "type": "object",
+          "required": ["name"],
+          "additionalProperties": false,
+          "properties": { "name": { "const": "urn:ogc:def:crs:OGC:1.3:CRS84" } }
+        }
+      }
+    },
+    "properties": {
+      "type": "object",
+      "required": ["runId", "resultId", "generatedAt", "mode", "territoriesCount", "hasOverlap", "aggregateNote"],
+      "additionalProperties": false,
+      "properties": {
+        "runId": { "type": "string", "format": "uuid" },
+        "resultId": { "type": "string", "format": "uuid" },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "mode": { "enum": ["single", "combined"] },
+        "territoriesCount": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "hasOverlap": {
+          "type": "boolean",
+          "description": "true, если территории результата пересекаются: площади не считаются уникальными"
+        },
+        "aggregateNote": {
+          "type": "string",
+          "const": "сумма по территориям (с возможным пересечением)",
+          "description": "Обязательная пометка суммарной статистики (решение по комбинированному результату)"
+        },
+        "sourcesCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "features": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/changeZoneFeature" }
+    }
+  },
+  "$defs": {
+    "changeZoneFeature": {
+      "type": "object",
+      "required": ["type", "geometry", "properties"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "Feature" },
+        "geometry": {
+          "type": "object",
+          "required": ["type", "coordinates"],
+          "properties": {
+            "type": { "enum": ["Polygon", "MultiPolygon"] },
+            "coordinates": {
+              "type": "array",
+              "description": "Координаты в EPSG:4326; долгота в диапазоне [-180, 180], широта — [-90, 90]; геометрия должна быть валидной (проверка PostGIS ST_IsValid)"
+            }
+          }
+        },
+        "properties": {
+          "type": "object",
+          "required": ["territory_name", "change_class", "area_km2"],
+          "additionalProperties": false,
+          "properties": {
+            "territory_name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Имя территории из текста запроса либо «Область N» (FR-002)"
+            },
+            "territory_position": { "type": "integer", "minimum": 1, "maximum": 5 },
+            "change_class": {
+              "enum": ["retained", "lost", "new"],
+              "description": "Класс изменения: сохранившиеся, потерянные, новые (FR-006)"
+            },
+            "area_km2": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Площадь зоны в км², рассчитанная средствами PostGIS"
+            },
+            "period_start": { "type": "string", "format": "date" },
+            "period_end": { "type": "string", "format": "date" },
+            "run_id": { "type": "string", "format": "uuid" },
+            "result_id": { "type": "string", "format": "uuid" }
+          }
+        }
+      }
+    }
+  },
+  "$comment": "Проверки, не выражаемые схемой и выполняемые в contract-тестах: (1) все координаты внутри допустимых диапазонов EPSG:4326; (2) геометрии валидны (ST_IsValid); (3) при territoriesCount > 1 установлен hasOverlap либо подтверждено отсутствие пересечений через ST_Intersects; (4) сумма площадей по features согласуется с aggregate-статистикой результата с точностью округления."
+}
