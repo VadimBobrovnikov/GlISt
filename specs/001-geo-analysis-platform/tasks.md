@@ -34,12 +34,12 @@
 - [X] T002 Создать манифест зависимостей и конфигурацию инструментов в `backend/pyproject.toml`: рантайм — fastapi, uvicorn, sqlmodel, alembic, pydantic v2, pydantic-settings, langgraph, langfuse, rasterio, geopandas, numpy, httpx, pystac-client, arq, redis, reportlab, matplotlib; dev — pytest, pytest-asyncio, pytest-cov, testcontainers, ruff, mypy, scikit-learn; секции `[tool.ruff]` (line-length 100), `[tool.mypy]` (`strict = true`), `[tool.pytest.ini_options]` (`asyncio_mode = "auto"`), `[tool.coverage.report]` с `omit = ["*/agents/*"]`; зафиксировать `backend/uv.lock`
 - [X] T003 [P] Создать каркас Flutter Web в `frontend/` (`flutter create --platforms web`) и добавить в `frontend/pubspec.yaml`: `flutter_riverpod`, `dio`, `web_socket_channel`, `flutter_map`, `latlong2`; настроить `frontend/analysis_options.yaml`
 - [X] T004 [P] Создать `docker-compose.yml`: сервисы `postgres` (PostgreSQL 16 + PostGIS + pgvector), `redis`, `langfuse`, `api`, `worker`; образы зафиксированы тегами/дайджестами (Принцип II); тома для БД, артефактов и кэша тайлов
-- [ ] T005 [P] Создать `.env.example` со всеми переменными окружения без значений секретов: `DATABASE_URL`, `REDIS_URL`, `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LLM_PROVIDER` (`openai`|`ollama`), `LLM_MODEL`, `EMBEDDING_MODEL`, `OLLAMA_BASE_URL`, `SEED`, `OSM_USER_AGENT`, `ARTIFACTS_DIR`
-- [ ] T006 [P] Создать `.github/workflows/ci.yml` с блокирующими гейтами: `ruff check`, `ruff format --check`, `mypy --strict`, `pytest --cov` (порог 80%), `alembic check`, secret scanning, `dart format --set-exit-if-changed`, `flutter analyze`
+- [X] T005 [P] Создать `.env.example` со всеми переменными окружения без значений секретов: `DATABASE_URL`, `REDIS_URL`, `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LLM_PROVIDER` (`openai`|`ollama`), `LLM_MODEL`, `EMBEDDING_MODEL`, `OLLAMA_BASE_URL`, `SEED`, `OSM_USER_AGENT`, `ARTIFACTS_DIR`
+- [X] T006 [P] Создать `.github/workflows/ci.yml` с блокирующими гейтами: `ruff check`, `ruff format --check`, `mypy --strict`, `pytest --cov` (порог 80%), `alembic check`, secret scanning, `dart format --set-exit-if-changed`, `flutter analyze`
 - [ ] T007 [P] Инициализировать Alembic: `backend/alembic.ini` и `backend/alembic/env.py` (async engine, `target_metadata` из `glist.db.models`)
 - [ ] T008 [P] Создать `backend/tests/conftest.py`: фикстура PostGIS-контейнера (testcontainers), async-сессия БД с откатом, тестовый HTTP-клиент, подключение мок-провайдера LLM, фикстура мок-LangFuse (или локальный LangFuse в testcontainers) для офлайн-тестов — допустимо по Принципу III (оговорка про офлайн-тесты)
-- [ ] T009 [P] Создать smoke-тест запуска клиента `frontend/test/app_smoke_test.dart`
-- [ ] T010 Создать `README.md` с командами запуска стенда (ссылка на [quickstart.md](./quickstart.md)) и описанием структуры репозитория
+- [X] T009 [P] Создать smoke-тест запуска клиента `frontend/test/app_smoke_test.dart`
+- [X] T010 Создать `README.md` с командами запуска стенда (ссылка на [quickstart.md](./quickstart.md)) и описанием структуры репозитория
 
 ---
 

@@ -216,10 +216,18 @@ cd frontend && dart format --output=none --set-exit-if-changed . && flutter anal
   Допустимо **только** для локального исследовательского стенда: без публичного доступа и PII.
   План замены — [plan.md](./plan.md) → Complexity Tracking, отклонение №5; при переходе на production
   компонент заменяется на активно поддерживаемый S3-совместимый образ.
-- **`flutter analyze` локально на кириллическом пути.** Анализатор Dart падает
-  (`FormatException` в LSP-канале) при запуске из пути с не-ASCII символами. Обход: junction
-  `mklink /J D:\glist "<путь к репозиторию>"` и запуск flutter-команд из `D:\glist\frontend`;
-  либо проверять через `dart analyze`. На CI (ASCII-пути) ограничение не действует.
+- **Кириллица в путях: два независимых дефекта toolchain Flutter.**
+  1) `flutter test`: компилятор шейлеров impellerc теряет кодировку пути **SDK** →
+     `#include flutter/runtime_effect.glsl` не находится, шейлеры не компилируются, любые тесты,
+     касающиеся Material-сплэшей, падают с `Asset 'shaders/ink_sparkle.frag' not found`.
+     Обход: junction SDK — `cmd /c mklink /J D:\flutsdk "<путь к flutter SDK>"` и запуск
+     `D:\flutsdk\bin\flutter.bat …` (путь SDK становится ASCII).
+  2) `flutter analyze`: анализатор падает (`FormatException` в LSP-канале) из-за не-ASCII
+     **проектного** пути. Обход: junction проекта — `mklink /J D:\glist "<путь к репозиторию>"`
+     и запуск из `D:\glist\frontend`.
+  Рабочая связка: `cd D:\glist\frontend` + `D:\flutsdk\bin\flutter.bat {analyze,test,build}`.
+  Альтернатива для анализа — `dart analyze` (работает с кириллицей). На CI (ASCII-пути)
+  ограничения не действуют.
 
 ## 8. Ссылки
 
