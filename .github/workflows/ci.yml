@@ -1,0 +1,114 @@
+# CI GlISt — блокирующие гейты конституции (Принцип VIII, раздел «Процесс разработки и контроль качества»):
+#   ruff check, ruff format --check, mypy --strict, pytest --cov (порог 80%),
+#   alembic check, secret scanning, dart format --set-exit-if-changed, flutter analyze (+flutter test).
+# Пути на GitHub Actions ASCII по определению — junction D:\glist для flutter-шагов не нужен.
+name: CI
+
+on:
+  push:
+    branches: [master, main, '001-*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-lint:
+    name: "backend: ruff check + ruff format + mypy --strict"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.19" # та же версия, что в backend/Dockerfile (Принцип II)
+      - name: Зависимости по lock-файлу
+        run: uv sync --frozen
+      - name: "Гейт: ruff check"
+        run: uv run ruff check .
+      - name: "Гейт: ruff format --check"
+        run: uv run ruff format --check .
+      - name: "Гейт: mypy --strict"
+        run: uv run mypy src/glist
+
+  backend-tests:
+    name: "backend: pytest --cov (порог 80%)"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.19"
+      - name: Зависимости по lock-файлу
+        run: uv sync --frozen
+      # Тесты поднимают PostGIS-контейнер testcontainers — Docker доступен на ubuntu-latest.
+      # Порог 80% задан в [tool.coverage.report].fail_under; пакеты agents/ исключены (Принцип VIII).
+      - name: "Гейт: pytest --cov"
+        run: uv run pytest --cov
+
+  migrations:
+    name: "backend: alembic upgrade head + alembic check"
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql+asyncpg://glist:ci_password@localhost:5432/glist
+    steps:
+      - uses: actions/checkout@v4
+      - name: Собрать образ БД (PostGIS + pgvector)
+        run: docker build -f backend/deploy/postgis-pgvector.Dockerfile -t glist-postgis:ci backend/deploy
+      - name: Запустить БД и дождаться готовности
+        run: |
+          docker run -d --name pg -p 5432:5432 \
+            -e POSTGRES_USER=glist -e POSTGRES_PASSWORD=ci_password -e POSTGRES_DB=glist \
+            glist-postgis:ci
+          for i in $(seq 1 30); do
+            docker exec pg pg_isready -U glist && break
+            sleep 2
+          done
+          docker exec pg pg_isready -U glist
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.19"
+      - name: Зависимости по lock-файлу
+        run: uv sync --frozen
+        working-directory: backend
+      - name: "Гейт: alembic upgrade head && alembic check"
+        run: uv run alembic upgrade head && uv run alembic check
+        working-directory: backend
+
+  secret-scan:
+    name: "security: secret scanning (gitleaks)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: "Гейт: gitleaks"
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  frontend:
+    name: "frontend: dart format + flutter analyze + flutter test"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.6 # фиксация версии (Принцип II), локально та же
+      - name: Зависимости
+        run: flutter pub get
+      - name: "Гейт: dart format --set-exit-if-changed"
+        run: dart format --set-exit-if-changed .
+      - name: "Гейт: flutter analyze"
+        run: flutter analyze
+      - name: "Гейт: flutter test (smoke)"
+        run: flutter test
