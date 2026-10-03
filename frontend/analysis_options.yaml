@@ -1,0 +1,38 @@
+# Конфигурация анализатора GlISt: flutter_lints + строгие режимы языка.
+# Гейт CI (T006/T109): `flutter analyze` без предупреждений, `dart format --set-exit-if-changed`.
+
+# The following line activates a set of recommended lints for Flutter apps,
+# packages, and plugins designed to encourage good coding practices.
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - build/**
+    - web/**
+  language:
+    # Строгая типизация (конституция, Принцип X): без неявных кастов и raw-типов.
+    strict-casts: true
+    strict-raw-types: true
+    strict-inference: true
+
+linter:
+  # The lint rules applied to this project can be customized in the
+  # section below to disable rules from the `package:flutter_lints/flutter.yaml`
+  # included above or to enable additional rules. A list of all available lints
+  # and their documentation is published at https://dart.dev/lints.
+  #
+  # Instead of disabling a lint rule for the entire project in the
+  # section below, it can also be suppressed for a single line of code
+  # or a specific dart file by using the `// ignore: name_of_lint` and
+  # `// ignore_for_file: name_of_lint` syntax on the line or in the file
+  # producing the lint.
+  rules:
+    # Явные const/final для локальных переменных.
+    prefer_final_locals: true
+    # Незавершённые Future — предупреждение анализатора (гейт flutter analyze).
+    unawaited_futures: true
+    # Сортировка директив импорта (dart format не следит за ней).
+    directives_ordering: true
+
+# Additional information about this file can be found at
+# https://dart.dev/guides/language/analysis-options
