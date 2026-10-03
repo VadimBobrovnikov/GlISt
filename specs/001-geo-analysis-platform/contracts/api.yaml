@@ -503,7 +503,21 @@ components:
         seed: { type: integer }
         settingsHash: { type: string }
         paramsHash: { type: string }
-        ragIndexVersion: { type: string }
+        ragIndexVersion:
+          type: string
+          description: Версия индекса RAG, использованного при формировании объяснения (FR-018)
+        modelVersions:
+          type: object
+          description: "Версии моделей и промптов, использованных в запуске (FR-018, Принципы II и III конституции: пользователь должен видеть, чем получен результат). Соответствует полю analysis_run.model_versions из data-model.md; значение обязательно при создании analysis_run (см. T062)"
+          additionalProperties: false
+          required: [llmModel, embeddingModel, promptVersions]
+          properties:
+            llmModel: { type: string }
+            embeddingModel: { type: string }
+            promptVersions:
+              type: array
+              description: Версии промптов по узлам графа (researcher, analyst, visualizer, validator)
+              items: { type: string }
         isReference: { type: boolean }
         isPinned: { type: boolean }
         retentionUntil: { type: string, format: date-time, nullable: true }

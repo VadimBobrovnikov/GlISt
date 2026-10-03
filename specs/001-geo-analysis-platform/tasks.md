@@ -37,7 +37,7 @@
 - [ ] T005 [P] Создать `.env.example` со всеми переменными окружения без значений секретов: `DATABASE_URL`, `REDIS_URL`, `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LLM_PROVIDER` (`openai`|`ollama`), `LLM_MODEL`, `EMBEDDING_MODEL`, `OLLAMA_BASE_URL`, `SEED`, `OSM_USER_AGENT`, `ARTIFACTS_DIR`
 - [ ] T006 [P] Создать `.github/workflows/ci.yml` с блокирующими гейтами: `ruff check`, `ruff format --check`, `mypy --strict`, `pytest --cov` (порог 80%), `alembic check`, secret scanning, `dart format --set-exit-if-changed`, `flutter analyze`
 - [ ] T007 [P] Инициализировать Alembic: `backend/alembic.ini` и `backend/alembic/env.py` (async engine, `target_metadata` из `glist.db.models`)
-- [ ] T008 [P] Создать `backend/tests/conftest.py`: фикстура PostGIS-контейнера (testcontainers), async-сессия БД с откатом, тестовый HTTP-клиент, подключение мок-провайдера LLM
+- [ ] T008 [P] Создать `backend/tests/conftest.py`: фикстура PostGIS-контейнера (testcontainers), async-сессия БД с откатом, тестовый HTTP-клиент, подключение мок-провайдера LLM, фикстура мок-LangFuse (или локальный LangFuse в testcontainers) для офлайн-тестов — допустимо по Принципу III (оговорка про офлайн-тесты)
 - [ ] T009 [P] Создать smoke-тест запуска клиента `frontend/test/app_smoke_test.dart`
 - [ ] T010 Создать `README.md` с командами запуска стенда (ссылка на [quickstart.md](./quickstart.md)) и описанием структуры репозитория
 
@@ -80,7 +80,7 @@
 - [ ] T038 Реализовать WebSocket `backend/src/glist/api/ws.py`: подписка на Redis pub/sub по `runId`, трансляция событий по контракту, штатное закрытие после терминального события
 - [ ] T039 [P] Создать contract-тесты API-каркаса `backend/tests/contract/test_api_contract.py`: соответствие реализованных эндпоинтов `contracts/api.yaml`, схема `Health`, форма `Error` для 404/422
 - [ ] T040 [P] Создать unit-тесты пространственного слоя `backend/tests/unit/test_spatial_queries.py`: SRID-проверка, валидность и `ST_MakeValid`, площадь, пересечение, буфер — на реальном PostGIS-контейнере
-- [ ] T041 Создать smoke-тест графа `backend/tests/integration/test_graph_smoke.py`: полный маршрут с мок-провайдером, проверка типизированного состояния и наличия непустых `description` у всех этапов
+- [ ] T041 Создать smoke-тест графа `backend/tests/integration/test_graph_smoke.py`: полный маршрут с мок-провайдером, проверка типизированного состояния и наличия непустых `description` у всех этапов; трассировка — через фикстуру мок-LangFuse из T008 (допустимо по Принципу III)
 
 **Checkpoint**: фундамент готов — истории можно реализовывать параллельно
 
@@ -99,8 +99,16 @@
 - [ ] T044 [P] [US1] Unit-тесты растровой обработки `backend/tests/unit/test_tools_raster_ops.py`: маски облачности SCL/QA_PIXEL, медианный композит в окне ±30 дней (+60 при нехватке), расчёт NDVI, маска воды NDWI — на синтетических растрах
 - [ ] T045 [P] [US1] Unit-тесты классификации и зон `backend/tests/unit/test_tools_landcover.py`: порог NDVI из `settings_profile`, использование ESA WorldCover как базового слоя, формирование классов `retained`/`lost`/`new`, фильтр минимальной площади 1000 м², площади только из PostGIS
 - [ ] T046 [P] [US1] Unit-тесты экспорта `backend/tests/unit/test_tools_export_geojson.py`: один `FeatureCollection`, отсутствие лишних атрибутов (`additionalProperties: false`), уникальность `territory_position`
-- [ ] T047 [US1] Интеграционный тест US1 `backend/tests/integration/test_us1_typical_query.py`: полный маршрут графа с мок-провайдером на PostGIS-контейнере, проверка SC-001 (результат ≤60 с), SC-004 (источники и даты съёмки в ответе), SC-011-совместимость статусов
+- [ ] T047 [US1] Интеграционный тест US1 `backend/tests/integration/test_us1_typical_query.py`: полный маршрут графа с мок-провайдером на PostGIS-контейнере, проверка SC-001 (результат ≤60 с), SC-004 (источники и даты съёмки в ответе), SC-011-совместимость статусов; трассировка через фикстуру мок-LangFuse из T008 (Принцип III)
 - [ ] T048 [P] [US1] Widget-тест клиента `frontend/test/query_flow_test.dart`: ввод запроса → отображение карты, объяснения и списка источников
+- [ ] T115 [P] [US1] Unit-тест узла Researcher `backend/tests/unit/test_agent_researcher.py`: фикстура State → проверка частичного обновления (территория, период, тип анализа, `datasets`, `data_alternatives`) и непустого `description` этапа (Принцип V, контракт [contracts/agent-state.md](./contracts/agent-state.md))
+- [ ] T116 [P] [US1] Unit-тест узла Analyst `backend/tests/unit/test_agent_analyst.py`: фикстура State → проверка записи `raster_refs`, `change_zones`, `territory_stats` и `aggregate` с обязательной пометкой «сумма по территориям (с возможным пересечением)»
+- [ ] T117 [P] [US1] Unit-тест узла Visualizer `backend/tests/unit/test_agent_visualizer.py`: фикстура State → `map_layers`, ссылки на превью и финальный GeoTIFF, `explanation.citations` и привязка выводов к территориям
+- [ ] T118 [P] [US1] Unit-тест узла Validator `backend/tests/unit/test_agent_validator.py`: фикстура State → `validation.outcome`/`category`/`reasons`, запрет повторного инкремента `attempt_no` (≤1 переработка — FR-007)
+- [ ] T119 [P] [US1] Unit-тест изоляции модулей агентов `backend/tests/unit/test_agent_isolation.py`: проверка отсутствия прямых импортов между `agents/{researcher,analyst,visualizer,validator}.py` и отсутствия бинарных данных в состоянии (обмен только через State — Принцип V)
+- [ ] T120 [US1] Валидация языка запроса в `backend/src/glist/api/queries.py`: определение языка входа, принятие только `ru`/`en`, отклонение с кодом `validation_error` и сообщением о поддерживаемых языках без запуска анализа (FR-001, граничный случай «неподдерживаемый язык» из [spec.md](./spec.md))
+- [ ] T121 [US1] Предупреждение о большой территории в `backend/src/glist/agents/researcher.py` (порог ~300 км² по `area_km2` из PostGIS, значение в состоянии) и на клиенте `frontend/lib/features/query/query_form.dart`: предупреждение о времени обработки с возможностью подтверждения или сужения территории (Assumptions, граничный случай «слишком большая территория»)
+- [ ] T122 [US1] Обработка территории, частично выходящей за пределы покрытия, в `backend/src/glist/agents/researcher.py`: обработка доступной части с явным сообщением об исключённой области в `status_reason` и в объяснении результата (граничный случай «частичное покрытие» из [spec.md](./spec.md))
 
 ### Implementation for User Story 1
 
@@ -118,14 +126,14 @@
 - [ ] T059 [US1] Реализовать агента Analyst `backend/src/glist/agents/analyst.py`: композит → NDVI → бинарная классификация → зоны изменений → запись геометрий и расчёт площадей в PostGIS; заполнение `territory_stats` и `aggregate` с пометкой о возможном пересечении; описание каждого этапа
 - [ ] T060 [US1] Реализовать агента Visualizer `backend/src/glist/agents/visualizer.py`: формирование `map_layers`, превью PNG, финального GeoTIFF (`final_geotiff`, бессрочное хранение), объяснения с `citations` и списком источников, привязка выводов к территориям (FR-008, FR-009, FR-014)
 - [ ] T061 [US1] Реализовать агента Validator `backend/src/glist/agents/validator.py`: проверки валидности геометрий, баланса классов, минимальной площади, качества данных; заполнение `validation.outcome`, `category`, `reasons`; запись в `validation_rejection` (FR-007)
-- [ ] T062 [US1] Собрать маршрут графа для US1 `backend/src/glist/agents/graph.py`: `researcher → analyst → visualizer → validator → finalize`, сохранение `analysis_result`/`result_territory`/`change_zone`, создание записи `settings_profile` по `settings_hash`, фиксация `seed`/`params_hash`/`trace_id`
+- [ ] T062 [US1] Собрать маршрут графа для US1 `backend/src/glist/agents/graph.py`: `researcher → analyst → visualizer → validator → finalize`, сохранение `analysis_result`/`result_territory`/`change_zone`, создание записи `settings_profile` по `settings_hash`, фиксация `seed`/`params_hash`/`trace_id`, а также `model_versions` (модель LLM, модель эмбеддингов, версии промптов по узлам графа) и `rag_index_version` — поля not null заполняются при создании `analysis_run` и возвращаются в `GET /runs/{runId}` (FR-018; см. схему `Run.modelVersions`/`Run.ragIndexVersion` в [contracts/api.yaml](./contracts/api.yaml))
 - [ ] T063 [US1] Реализовать API запросов `backend/src/glist/api/queries.py`: `POST /api/v1/queries` (валидация `QueryCreate` из контракта, постановка запуска в очередь), `GET /api/v1/queries` (история с курсором), `GET /api/v1/queries/{queryId}`
 - [ ] T064 [US1] Реализовать API запусков `backend/src/glist/api/runs.py`: `GET /api/v1/runs/{runId}`, `GET /api/v1/runs/{runId}/stages`, `GET /api/v1/runs/{runId}/result` (409, пока результат не готов; 200 для статусов `завершён` и `не прошёл проверку`)
 - [ ] T065 [US1] Реализовать API экспорта `backend/src/glist/api/exports.py`: `POST /api/v1/runs/{runId}/exports`, `GET /api/v1/runs/{runId}/exports`, `GET /api/v1/artifacts/{artifactId}/content` (410 при удалённом тяжёлом артефакте — FR-022)
 - [ ] T066 [P] [US1] Реализовать API-клиент и DTO клиента `frontend/lib/core/api_client.dart` и `frontend/lib/shared/models/` (`territoryName`, `changeClass`, `areaKm2`, статусы запуска) на dio, с обработкой кодов 409/410
-- [ ] T067 [P] [US1] Реализовать экран ввода запроса `frontend/lib/features/query/` (Riverpod-провайдеры, отправка запроса, отображение ошибок валидации)
+- [ ] T067 [P] [US1] Реализовать форму ввода запроса `frontend/lib/features/query/query_form.dart` (Riverpod-провайдеры, отправка запроса, отображение ошибок валидации)
 - [ ] T068 [P] [US1] Реализовать карту `frontend/lib/features/map/`: `flutter_map` с базовым слоем OSM, тремя слоями зон изменений (включение/отключение), легендой и площадями зон, масштабирование и панорамирование (FR-008)
-- [ ] T069 [US1] Реализовать экран результата `frontend/lib/features/result/`: объяснение, список источников с датами съёмки, таблица площадей, причины отклонений валидатора (SC-004, SC-011)
+- [ ] T069 [US1] Реализовать экран результата `frontend/lib/features/result/result_view.dart`: объяснение, список источников с датами съёмки, таблица площадей, причины отклонений валидатора (SC-004, SC-011)
 - [ ] T070 [US1] Реализовать экспорт на клиенте `frontend/lib/features/export/`: запрос формирования и скачивание PDF/GeoJSON (FR-014)
 
 **Checkpoint**: US1 работает независимо — это MVP; проверяется сценариями V1 и V8 из [quickstart.md](./quickstart.md)
@@ -164,7 +172,7 @@
 
 - [ ] T077 [P] [US3] Unit-тесты композиции результата `backend/tests/unit/test_result_composer.py`: режимы `add`/`replace`, раздельное хранение слоёв, флаг `has_overlap` через `ST_Intersects`, лимит 5 территорий с отказом, обязательная пометка суммарной статистики
 - [ ] T078 [P] [US3] Unit-тесты именования территорий `backend/tests/unit/test_territory_naming.py`: имя из текста запроса, иначе «Область N» по порядку добавления, `name_source` ∈ `query_text|generated`
-- [ ] T079 [US3] Интеграционный тест US3 `backend/tests/integration/test_us3_follow_up.py`: контекст включает все ранее накопленные территории (SC-009), третье уточнение добавляется ко всем предыдущим, шестая территория отклоняется, создаётся новый запуск с `parent_run_id` (FR-019 соблюдён)
+- [ ] T079 [US3] Интеграционный тест US3 `backend/tests/integration/test_us3_follow_up.py`: контекст включает все ранее накопленные территории (SC-009), третье уточнение добавляется ко всем предыдущим, шестая территория отклоняется, создаётся новый запуск с `parent_run_id` (FR-019 соблюдён); трассировка через фикстуру мок-LangFuse из T008 (Принцип III)
 
 ### Implementation for User Story 3
 
@@ -173,7 +181,7 @@
 - [ ] T082 [US3] Реализовать именование территорий `backend/src/glist/services/territory_naming.py`: извлечение имени из текста запроса, при неудаче «Область N», сохранение в `area_of_interest.name` и `result_territory.territory_name` (FR-002)
 - [ ] T083 [US3] Поддержать режимы уточнения в API `backend/src/glist/api/queries.py`: приём `parentQueryId` и `mode` (`add`/`replace`) по схеме `QueryCreate`, возврат `clarification` при нехватке контекста
 - [ ] T084 [US3] Обновить экспорт для комбинированных результатов `backend/src/glist/services/export_service.py` и `backend/src/glist/tools/export_geojson.py`: раздельные таблицы по территориям, суммарная таблица с пометкой о пересечении, единый FeatureCollection со всеми территориями (FR-014)
-- [ ] T085 [P] [US3] Реализовать выбор режима на клиенте `frontend/lib/features/result/`: переключатель «дополнить предыдущий» / «заменить предыдущий», отображение различимого оформления слоёв и пометки о пересечении
+- [ ] T085 [P] [US3] Реализовать выбор режима на клиенте `frontend/lib/features/result/combine_mode_switch.dart`: переключатель «дополнить предыдущий» / «заменить предыдущий», отображение различимого оформления слоёв и пометки о пересечении
 - [ ] T086 [US3] Обновить экран истории для цепочки уточнений `frontend/lib/features/history/`: отображение связи `parent_run_id` и переходов по цепочке
 
 **Checkpoint**: уточняющие запросы работают независимо; проверяются сценарием V3
@@ -190,7 +198,7 @@
 
 - [ ] T087 [P] [US4] Contract-тест WebSocket-событий `backend/tests/contract/test_ws_events.py`: обязательные поля `event`/`runId`/`occurredAt`, состав типов событий и payload строго по [contracts/websocket-events.md](./contracts/websocket-events.md)
 - [ ] T088 [P] [US4] Unit-тесты планировщика переработки `backend/tests/unit/test_rework_policy.py`: переработка только при `analysis_error` и `attempt_no == 0`; при `data_quality` переработки нет; повторная переработка запрещена
-- [ ] T089 [US4] Интеграционные тесты US4 `backend/tests/integration/test_us4_validation_queue.py`: одна переработка при `analysis_error`; мгновенный статус «не прошёл проверку» при `data_quality`; обе группы причин при повторном отклонении; ровно один активный запуск и автостарт следующего (SC-012); сохранение обеих групп причин в `validation_rejection`
+- [ ] T089 [US4] Интеграционные тесты US4 `backend/tests/integration/test_us4_validation_queue.py`: одна переработка при `analysis_error`; мгновенный статус «не прошёл проверку» при `data_quality`; обе группы причин при повторном отклонении; ровно один активный запуск и автостарт следующего (SC-012); сохранение обеих групп причин в `validation_rejection`; трассировка через фикстуру мок-LangFuse из T008 (Принцип III)
 - [ ] T090 [P] [US4] Widget-тест прогресса `frontend/test/progress_test.dart`: отображение этапов с описаниями, индикация отклонения и переработки, отображение очереди
 
 ### Implementation for User Story 4
@@ -199,8 +207,8 @@
 - [ ] T092 [US4] Реализовать API очереди `backend/src/glist/api/queue.py`: `GET /api/v1/queue` со схемой `QueueState` (активный запуск и ожидающие в порядке старта)
 - [ ] T093 [US4] Реализовать правило переработки и сохранение причин `backend/src/glist/agents/graph.py`, `backend/src/glist/agents/validator.py`, `backend/src/glist/services/run_service.py`: условное ребро по категории причины, лимит `attempt_count ≤ 1`, запись `validation_rejection` для обеих попыток, заполнение `fixes_applied`, сохранение `rejection_category` (FR-007, FR-020, SC-011)
 - [ ] T094 [US4] Реализовать эндпоинт трассировки `backend/src/glist/api/runs.py`: `GET /api/v1/runs/{runId}/trace` со схемой `TraceRef` (`traceId`, ссылка на LangFuse) (FR-016, SC-005)
-- [ ] T095 [P] [US4] Реализовать клиент прогресса `frontend/lib/core/ws_client.dart` и `frontend/lib/features/progress/`: подписка на `/ws/runs/{id}`, список этапов с описаниями, индикация отклонения и переработки, дозапрос `GET /runs/{id}/stages` при обрыве соединения
-- [ ] T096 [P] [US4] Реализовать отображение очереди на клиенте `frontend/lib/features/progress/`: активный запуск и список ожидающих, автоматическая замена активного трека (FR-021, SC-012)
+- [ ] T095 [P] [US4] Реализовать клиент прогресса `frontend/lib/core/ws_client.dart` и `frontend/lib/features/progress/stage_list.dart`: подписка на `/ws/runs/{id}`, список этапов с описаниями, индикация отклонения и переработки, дозапрос `GET /runs/{id}/stages` при обрыве соединения
+- [ ] T096 [P] [US4] Реализовать отображение очереди на клиенте `frontend/lib/features/progress/queue_panel.dart`: активный запуск и список ожидающих, автоматическая замена активного трека (FR-021, SC-012)
 
 **Checkpoint**: live-прогресс, очередь и правило переработки работают; проверяются сценариями V4, V6, V7
 
@@ -215,14 +223,14 @@
 ### Tests for User Story 5
 
 - [ ] T097 [P] [US5] Unit-тесты альтернатив `backend/tests/unit/test_alternatives_service.py`: не менее трёх вариантов (другой период, другой источник, ближайшая дата), исключение вариантов, не содержащих пригодных сцен, сохранение параметров выбора
-- [ ] T098 [US5] Интеграционный тест US5 `backend/tests/integration/test_us5_no_data.py`: статус `данные недоступны` с причиной; обработка продолжается после ответа без повторного ввода исходного запроса (FR-015, SC-008); при отказе от альтернатив запрос сохраняется в истории со статусом и причиной
+- [ ] T098 [US5] Интеграционный тест US5 `backend/tests/integration/test_us5_no_data.py`: статус `данные недоступны` с причиной; обработка продолжается после ответа без повторного ввода исходного запроса (FR-015, SC-008); при отказе от альтернатив запрос сохраняется в истории со статусом и причиной; трассировка через фикстуру мок-LangFuse из T008 (Принцип III)
 
 ### Implementation for User Story 5
 
 - [ ] T099 [US5] Реализовать сервис альтернатив `backend/src/glist/services/alternatives_service.py`: поиск альтернатив (другой период ±60 дней, другой источник Sentinel-2 ↔ Landsat, ближайшая доступная дата), не менее трёх вариантов, фильтрация по облачности ≤20 % (FR-015)
 - [ ] T100 [US5] Реализовать ответ на уточнение/альтернативу `backend/src/glist/api/clarifications.py`: `POST /api/v1/clarifications/{clarificationId}/answer` с валидацией `ClarificationAnswer`, обработка 409 для закрытых уточнений, продолжение обработки без повторного ввода (FR-015, SC-008)
 - [ ] T101 [US5] Реализовать статус «данные недоступны» `backend/src/glist/services/run_service.py` и `backend/src/glist/agents/researcher.py`: заполнение `status_reason`, сохранение `clarification_request` с вариантами, запись в историю при отказе пользователя
-- [ ] T102 [P] [US5] Реализовать интерфейс альтернатив `frontend/lib/features/query/`: отображение причины и списка альтернатив, выбор варианта, индикация продолжения обработки
+- [ ] T102 [P] [US5] Реализовать интерфейс альтернатив `frontend/lib/features/query/alternatives_panel.dart`: отображение причины и списка альтернатив, выбор варианта, индикация продолжения обработки
 
 **Checkpoint**: все пять историй функционально независимы
 
@@ -236,7 +244,7 @@
 - [ ] T104 Реализовать ежедневную ARQ-задачу очистки `backend/src/glist/jobs/retention.py`: удаление только истёкших тяжёлых артефактов, запись каждого удаления в `artifact_deletion_log` (что, когда, причина, освобождённый объём) (FR-023, SC-013)
 - [ ] T105 Реализовать управление признаком «сохранить навсегда» `backend/src/glist/api/runs.py` и `backend/src/glist/services/retention_service.py`: `PUT /api/v1/runs/{runId}/pin`, отмена ещё не выполненного планового удаления, исключение из очистки (FR-023)
 - [ ] T106 [P] Написать тесты политики хранения и идемпотентности `backend/tests/unit/test_retention_service.py` и `backend/tests/integration/test_retention_idempotency.py`: сдвиг времени на 13 месяцев, частичная очистка по видам артефактов, сохранение `final_geotiff`/`preview_png`/GeoJSON/PDF, работа журнала, повторный запуск с тем же `params_hash` создаёт новый запуск со `reused_result_id` без дубликата результата (FR-019, SC-013)
-- [ ] T107 Реализовать приёмочный контур SC-002 `backend/tests/acceptance/accuracy.py` и фикстуры `backend/tests/fixtures/`: 2 контрольные территории, не менее 50 проверочных участков на каждой, разметка вручную с опорой на ESA WorldCover; расчёт общей точности и macro-F1 по трём классам; отдельная CI-задача `acceptance` с отчётом и матрицей ошибок
+- [ ] T107 Реализовать приёмочный контур SC-002 `backend/tests/acceptance/accuracy.py` и фикстуры `backend/tests/fixtures/`: 2 контрольные территории, не менее 50 проверочных участков на каждой, разметка вручную с опорой на ESA WorldCover; расчёт общей точности и F1 по каждому из трёх классов отдельно (≥70% по каждому); macro-F1 — дополнительная метрика отчёта, не критерий приёмки; отдельная CI-задача `acceptance` с отчётом и матрицей ошибок
 - [ ] T108 Выполнить security hardening `backend/src/glist/api/`: `additionalProperties: false` во всех входных схемах, коды ошибок без внутренних деталей и SQL, отсутствие секретов в логах и трассировке, проверка secret scanning в `.github/workflows/ci.yml` (Принцип IX)
 - [ ] T109 Настроить полный набор блокирующих гейтов качества в `backend/pyproject.toml` и `.github/workflows/ci.yml`: покрытие ≥80% по `tools`/`services` с `omit = ["*/agents/*"]`, `mypy --strict`, `ruff check`/`ruff format --check`, `alembic check`, `dart format --set-exit-if-changed`, `flutter analyze` (Принцип VIII)
 - [ ] T110 Подготовить регламент проверки производительности `docs/perf-validation.md`: методика измерения SC-001 (≤60 с в 9 из 10 запусков) и SC-007 (первый этап ≤5 с, обновления ≤5 с), состав тестовых территорий, шаблон протокола измерений
@@ -276,7 +284,7 @@
 - Все Setup-задачи с [P] (T003–T009) выполняются параллельно
 - Все Foundational-задачи с [P] (T021–T023, T039–T040) выполняются параллельно
 - После Phase 2 истории могут вестись параллельно разными исполнителями
-- Внутри US1 параллельно: T042–T046 (тесты), T049–T055 (инструменты, разные файлы), T066–T068 (клиент)
+- Внутри US1 параллельно: T042–T046 (тесты инструментов), T115–T119 (unit-тесты узлов агентов), T049–T055 (инструменты, разные файлы), T066–T068 (клиент)
 - Внутри US4 параллельно: T087, T088, T090, T095, T096
 
 ---
@@ -296,6 +304,9 @@ Task: "Экспорт GeoJSON backend/src/glist/tools/export_geojson.py (T054)"
 Task: "Contract-тест GeoJSON backend/tests/contract/test_geojson_export.py (T042)"
 Task: "Unit-тесты подбора данных backend/tests/unit/test_tools_stac_search.py (T043)"
 Task: "Unit-тесты растровой обработки backend/tests/unit/test_tools_raster_ops.py (T044)"
+Task: "Unit-тест узла Researcher backend/tests/unit/test_agent_researcher.py (T115)"
+Task: "Unit-тест узла Analyst backend/tests/unit/test_agent_analyst.py (T116)"
+Task: "Unit-тест изоляции модулей агентов backend/tests/unit/test_agent_isolation.py (T119)"
 ```
 
 ## Parallel Example: User Story 4
