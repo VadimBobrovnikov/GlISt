@@ -6,7 +6,7 @@
 
 **Tests**: тестовые задачи **включены** — этого требует конституция проекта (Принцип VIII, NON-NEGOTIABLE): покрытие ≥80% по инструментам и бизнес-логике, обязательные unit-тесты инструментов и интеграционные тесты графа агентов, приёмочный контур SC-002. Это не TDD из спецификации, а обязательные блокирующие гейты CI (`.specify/memory/constitution.md` → «Процесс разработки и контроль качества»).
 
-**Constitution Check**: ограничения стека зафиксированы в [plan.md](./plan.md) → «Constitution Check» и «Complexity Tracking» (4 обоснованных отклонения, включая отложенную JWT-аутентификацию). Новые отклонения без амендмента конституции вводить нельзя.
+**Constitution Check**: ограничения стека зафиксированы в [plan.md](./plan.md) → «Constitution Check» и «Complexity Tracking» (5 обоснованных отклонений, включая отложенную JWT-аутентификацию и EOL-MinIO в стенде). Новые отклонения без амендмента конституции вводить нельзя.
 
 **Organization**: задачи сгруппированы по пользовательским историям — каждая реализуется и тестируется независимо (MVP = US1).
 
@@ -33,7 +33,7 @@
 - [X] T001 Создать структуру пакетов и тестовых каталогов из [plan.md](./plan.md) → «Source Code»: `backend/src/glist/{api,agents,llm,tools,rag,db,services,jobs,trace}/__init__.py` и `backend/tests/{unit,integration,contract,acceptance,fixtures}/__init__.py`
 - [X] T002 Создать манифест зависимостей и конфигурацию инструментов в `backend/pyproject.toml`: рантайм — fastapi, uvicorn, sqlmodel, alembic, pydantic v2, pydantic-settings, langgraph, langfuse, rasterio, geopandas, numpy, httpx, pystac-client, arq, redis, reportlab, matplotlib; dev — pytest, pytest-asyncio, pytest-cov, testcontainers, ruff, mypy, scikit-learn; секции `[tool.ruff]` (line-length 100), `[tool.mypy]` (`strict = true`), `[tool.pytest.ini_options]` (`asyncio_mode = "auto"`), `[tool.coverage.report]` с `omit = ["*/agents/*"]`; зафиксировать `backend/uv.lock`
 - [X] T003 [P] Создать каркас Flutter Web в `frontend/` (`flutter create --platforms web`) и добавить в `frontend/pubspec.yaml`: `flutter_riverpod`, `dio`, `web_socket_channel`, `flutter_map`, `latlong2`; настроить `frontend/analysis_options.yaml`
-- [ ] T004 [P] Создать `docker-compose.yml`: сервисы `postgres` (PostgreSQL 16 + PostGIS + pgvector), `redis`, `langfuse`, `api`, `worker`; образы зафиксированы тегами/дайджестами (Принцип II); тома для БД, артефактов и кэша тайлов
+- [X] T004 [P] Создать `docker-compose.yml`: сервисы `postgres` (PostgreSQL 16 + PostGIS + pgvector), `redis`, `langfuse`, `api`, `worker`; образы зафиксированы тегами/дайджестами (Принцип II); тома для БД, артефактов и кэша тайлов
 - [ ] T005 [P] Создать `.env.example` со всеми переменными окружения без значений секретов: `DATABASE_URL`, `REDIS_URL`, `LANGFUSE_HOST`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LLM_PROVIDER` (`openai`|`ollama`), `LLM_MODEL`, `EMBEDDING_MODEL`, `OLLAMA_BASE_URL`, `SEED`, `OSM_USER_AGENT`, `ARTIFACTS_DIR`
 - [ ] T006 [P] Создать `.github/workflows/ci.yml` с блокирующими гейтами: `ruff check`, `ruff format --check`, `mypy --strict`, `pytest --cov` (порог 80%), `alembic check`, secret scanning, `dart format --set-exit-if-changed`, `flutter analyze`
 - [ ] T007 [P] Инициализировать Alembic: `backend/alembic.ini` и `backend/alembic/env.py` (async engine, `target_metadata` из `glist.db.models`)

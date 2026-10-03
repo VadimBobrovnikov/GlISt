@@ -1,0 +1,241 @@
+# GlISt — локальный стенд (задача T004).
+#
+# Сервисы по задаче: postgres (PostgreSQL 16 + PostGIS + pgvector), redis, langfuse, api, worker
+# + внутренние зависимости self-host LangFuse v4 (langfuse-postgres, clickhouse, minio,
+# langfuse-worker) — их требует официальный compose LangFuse v4. См. quickstart.md →
+# «Известные ограничения стенда» и plan.md → Complexity Tracking, отклонение №5 (EOL MinIO).
+#
+# Принцип II (воспроизводимость): все внешние образы пинятся по digest; источник дайджестов —
+# Docker Hub Registry API и docker.langfuse.com, дата получения — 2026-10-03.
+# Принцип IX (безопасность): секреты только из .env; `${VAR:?}` — fail fast: без .env стенд не стартует.
+#
+# Переменные для .env описаны в .env.example (задача T005). Хостовые адреса (для alembic с хоста):
+# postgres 127.0.0.1:5432, redis 127.0.0.1:6379, langfuse http://localhost:3000, api :8000.
+
+name: glist
+
+services:
+  # ------------------------------------------------------------------ приложение
+  postgres:
+    build:
+      context: ./backend/deploy
+      dockerfile: postgis-pgvector.Dockerfile
+    image: glist/postgis-pgvector:16-3.5-pgvector
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-glist}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD задайте в .env}
+      POSTGRES_DB: ${POSTGRES_DB:-glist}
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    # Общий для ARQ (БД 0) и LangFuse (БД 1) — разделение по номерам БД, key-namespaces не пересекаются.
+    image: redis:8.8.3-alpine@sha256:0b2b77d3ea5078274795e3177cdbdada8b96316684a38911d528534ed679b5ec
+    restart: unless-stopped
+    environment:
+      REDIS_AUTH: ${REDIS_AUTH:?REDIS_AUTH задайте в .env}
+    # --maxmemory-policy noeviction требуется LangFuse.
+    command: >
+      redis-server --requirepass $$REDIS_AUTH
+      --maxmemory-policy noeviction
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_AUTH\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+    image: glist-api:0.1.0
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Контейнерные адреса перекрывают host-адреса из .env (в .env — localhost для alembic с хоста):
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-glist}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-glist}
+      REDIS_URL: redis://:${REDIS_AUTH:?}@redis:6379/0
+      LANGFUSE_HOST: http://langfuse:3000
+      ARTIFACTS_DIR: /data/artifacts
+    ports:
+      - "8000:8000"
+    volumes:
+      - artifacts:/data/artifacts
+      - tiles_cache:/data/cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./backend
+    image: glist-api:0.1.0
+    restart: unless-stopped
+    # ARQ: ровно один воркер (конкурентность 1 — SC-012); настройки — glist.jobs.worker.
+    command: ["arq", "glist.jobs.worker.WorkerSettings"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-glist}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-glist}
+      REDIS_URL: redis://:${REDIS_AUTH:?}@redis:6379/0
+      LANGFUSE_HOST: http://langfuse:3000
+      ARTIFACTS_DIR: /data/artifacts
+    volumes:
+      - artifacts:/data/artifacts
+      - tiles_cache:/data/cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ------------------------------------------------------------------ LangFuse v4 (обязателен: Принцип III)
+  langfuse:
+    image: docker.langfuse.com/langfuse/langfuse:4@sha256:3d2ae888a0e6edb41fdba6e7d5baca5e4baede3a870dac7970dadd9d925b018e
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment: &langfuse_env
+      NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3000}
+      DATABASE_URL: postgresql://${LANGFUSE_DB_USER:-langfuse}:${LANGFUSE_DB_PASSWORD:?LANGFUSE_DB_PASSWORD задайте в .env}@langfuse-postgres:5432/langfuse
+      SALT: "${LANGFUSE_SALT:?LANGFUSE_SALT - openssl rand -hex 32}"
+      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:?LANGFUSE_ENCRYPTION_KEY - openssl rand -hex 32}"
+      REDIS_CONNECTION_URL: redis://:${REDIS_AUTH:?}@redis:6379/1
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD задайте в .env}
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      CLICKHOUSE_CLUSTER_NAME: default
+      TELEMETRY_ENABLED: "false"
+      # S3-совместимое хранилище: MinIO (EOL — отклонение №5, только локальный стенд).
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD задайте в .env}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minio}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+      LANGFUSE_S3_MEDIA_UPLOAD_PUBLIC_ENDPOINT: http://localhost:9090
+    depends_on: &langfuse_depends_on
+      langfuse-postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4@sha256:52f7fd41ded2f1a6acab13ff7cb1832d36dfe2cbf44adea402b7a09cfa4ce800
+    restart: unless-stopped
+    environment: *langfuse_env
+    depends_on: *langfuse_depends_on
+
+  langfuse-postgres:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LANGFUSE_DB_USER:-langfuse}
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:?}
+      POSTGRES_DB: langfuse
+      TZ: UTC
+      PGTZ: UTC
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - langfuse_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+
+  # ------------------------------------------------------------------ внутренности LangFuse v4
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12@sha256:8a790dd3468db22b1d4e7b18a176f378ff5ff6053b9c48dd4ea1fa71a24c5ba6
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?}
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  minio:
+    # EOL-компонент (plan.md → Complexity Tracking, отклонение №5): официальные образы MinIO сняты
+    # с Docker Hub, бинарии dl.min.io недоступны (410 Gone). Пин по digest; для локального стенда.
+    image: bitnamilegacy/minio:2025.7.23-debian-12-r5@sha256:6dabb4a2088c9a79908de3bc05f4586c23ad2182c8908e7e3acbf61c1467fb20
+    restart: unless-stopped
+    # Запуск сервера напрямую (без entrypoint-скриптов): создаём каталог бакета `langfuse`
+    # и поднимаем minio; бинари minio/mc входят в PATH образа (USER 1001, том наследует права).
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -e
+        mkdir -p /bitnami/minio/data/langfuse
+        exec minio server --address ":9000" --console-address ":9001" /bitnami/minio/data
+    environment:
+      HOME: /bitnami/minio
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD задайте в .env (мин. 8 символов)}"
+    ports:
+      - "9090:9000"
+      - "127.0.0.1:9091:9001"
+    volumes:
+      - minio_data:/bitnami/minio/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
+  redisdata:
+  minio_data:
+  langfuse_pgdata:
+  clickhouse_data:
+  clickhouse_logs:
+  artifacts:        # артефакты запусков (персистентное — FR-022)
+  tiles_cache:      # кэш тайлов (перезаполняемый)
+

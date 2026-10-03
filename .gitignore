@@ -1,0 +1,36 @@
+# Python / backend
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Секреты — только через переменные окружения (конституция, Принцип IX)
+.env
+.env.*
+!.env.example
+
+# Flutter / frontend (дубль frontend/.gitignore для корня репозитория)
+frontend/.dart_tool/
+frontend/build/
+frontend/.flutter-plugins*
+frontend/.packages
+
+# Локальные данные стенда (тома docker compose, артефакты)
+data/
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

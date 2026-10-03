@@ -1,0 +1,13 @@
+# Контекст сборки api/worker: только рантайм (tests и кеши инструментов не нужны).
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+.coverage
+tests
+deploy
+README.md

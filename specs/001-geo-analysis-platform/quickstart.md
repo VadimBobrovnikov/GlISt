@@ -208,7 +208,20 @@ cd frontend && dart format --output=none --set-exit-if-changed . && flutter anal
 | V10 | Повторный запуск без дубликата результата | FR-019 |
 | Точность | Общая точность ≥85 % и F1 ≥70 % по каждому классу | SC-002 |
 
-## 7. Ссылки
+## 7. Известные ограничения стенда
+
+- **EOL MinIO в blobstorage LangFuse.** Для S3-совместимого хранилища используется
+  `bitnamilegacy/minio:2025.7.23-debian-12-r5` (пин по digest в `docker-compose.yml`): MinIO официально
+  EOL — dl.min.io отдаёт 410 Gone, образы сняты с Docker Hub, патчи безопасности не выходят.
+  Допустимо **только** для локального исследовательского стенда: без публичного доступа и PII.
+  План замены — [plan.md](./plan.md) → Complexity Tracking, отклонение №5; при переходе на production
+  компонент заменяется на активно поддерживаемый S3-совместимый образ.
+- **`flutter analyze` локально на кириллическом пути.** Анализатор Dart падает
+  (`FormatException` в LSP-канале) при запуске из пути с не-ASCII символами. Обход: junction
+  `mklink /J D:\glist "<путь к репозиторию>"` и запуск flutter-команд из `D:\glist\frontend`;
+  либо проверять через `dart analyze`. На CI (ASCII-пути) ограничение не действует.
+
+## 8. Ссылки
 
 - Спецификация: [spec.md](./spec.md) · План: [plan.md](./plan.md) · Исследование: [research.md](./research.md)
 - Модель данных: [data-model.md](./data-model.md)
