@@ -30,7 +30,7 @@
 
 **Purpose**: инициализация репозитория, зависимостей и локального стенда
 
-- [ ] T001 Создать структуру пакетов и тестовых каталогов из [plan.md](./plan.md) → «Source Code»: `backend/src/glist/{api,agents,llm,tools,rag,db,services,jobs,trace}/__init__.py` и `backend/tests/{unit,integration,contract,acceptance,fixtures}/__init__.py`
+- [X] T001 Создать структуру пакетов и тестовых каталогов из [plan.md](./plan.md) → «Source Code»: `backend/src/glist/{api,agents,llm,tools,rag,db,services,jobs,trace}/__init__.py` и `backend/tests/{unit,integration,contract,acceptance,fixtures}/__init__.py`
 - [ ] T002 Создать манифест зависимостей и конфигурацию инструментов в `backend/pyproject.toml`: рантайм — fastapi, uvicorn, sqlmodel, alembic, pydantic v2, pydantic-settings, langgraph, langfuse, rasterio, geopandas, numpy, httpx, pystac-client, arq, redis, reportlab, matplotlib; dev — pytest, pytest-asyncio, pytest-cov, testcontainers, ruff, mypy, scikit-learn; секции `[tool.ruff]` (line-length 100), `[tool.mypy]` (`strict = true`), `[tool.pytest.ini_options]` (`asyncio_mode = "auto"`), `[tool.coverage.report]` с `omit = ["*/agents/*"]`; зафиксировать `backend/uv.lock`
 - [ ] T003 [P] Создать каркас Flutter Web в `frontend/` (`flutter create --platforms web`) и добавить в `frontend/pubspec.yaml`: `flutter_riverpod`, `dio`, `web_socket_channel`, `flutter_map`, `latlong2`; настроить `frontend/analysis_options.yaml`
 - [ ] T004 [P] Создать `docker-compose.yml`: сервисы `postgres` (PostgreSQL 16 + PostGIS + pgvector), `redis`, `langfuse`, `api`, `worker`; образы зафиксированы тегами/дайджестами (Принцип II); тома для БД, артефактов и кэша тайлов
