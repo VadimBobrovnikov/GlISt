@@ -355,6 +355,29 @@ def testing_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     yield
 
 
+# Обязательные переменные окружения для Settings (T011): без них get_settings() падает.
+_REQUIRED_ENV: dict[str, str] = {
+    "DATABASE_URL": "postgresql+asyncpg://glist:db_secret@localhost:5432/glist",
+    "REDIS_URL": "redis://:redis_secret@localhost:6379/0",
+    "LANGFUSE_HOST": "http://localhost:3000",
+    "LANGFUSE_PUBLIC_KEY": "pk-test",
+    "LANGFUSE_SECRET_KEY": "sk-test",
+    "OSM_USER_AGENT": "GlISt-Research/0.1 (test@example.org)",
+    "OPENAI_API_KEY": "sk-openai-test",
+}
+
+
+@pytest.fixture
+def required_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Минимальный набор переменных для построения ``Settings`` (T011) в тестах.
+
+    Возвращает копию — тест может добавить свои переменные через тот же monkeypatch.
+    """
+    for key, value in _REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    return dict(_REQUIRED_ENV)
+
+
 @pytest.fixture
 def mock_langfuse(monkeypatch: pytest.MonkeyPatch) -> MockLangfuse:
     """Мок-клиент LangFuse: офлайн-тесты трассировки (Принцип III, контракт T089).

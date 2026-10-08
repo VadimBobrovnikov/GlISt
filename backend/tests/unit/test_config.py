@@ -11,24 +11,11 @@ from pydantic import ValidationError
 
 from glist.config import Settings, get_settings
 
-# Обязательные переменные окружения (без них Settings не строится).
-_BASE_ENV: dict[str, str] = {
-    "DATABASE_URL": "postgresql+asyncpg://glist:db_secret@localhost:5432/glist",
-    "REDIS_URL": "redis://:redis_secret@localhost:6379/0",
-    "LANGFUSE_HOST": "http://localhost:3000",
-    "LANGFUSE_PUBLIC_KEY": "pk-test",
-    "LANGFUSE_SECRET_KEY": "sk-test",
-    "OSM_USER_AGENT": "GlISt-Research/0.1 (test@example.org)",
-    "OPENAI_API_KEY": "sk-openai-test",
-}
-
 
 @pytest.fixture
-def settings_env(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
-    """Обязательные переменные окружения; возвращает копию для модификации в тестах."""
-    for key, value in _BASE_ENV.items():
-        monkeypatch.setenv(key, value)
-    return dict(_BASE_ENV)
+def settings_env(required_env: dict[str, str]) -> dict[str, str]:
+    """Обязательные переменные окружения (общая фикстура ``required_env`` в conftest)."""
+    return required_env
 
 
 def _settings(**overrides: Any) -> Settings:
