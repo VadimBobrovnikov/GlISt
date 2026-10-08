@@ -59,6 +59,9 @@ strict = true
 python_version = "3.11"
 mypy_path = ["src"]
 exclude = ["\\.venv"]
+# Плагин pydantic: корректный __init__ для BaseSettings/BaseModel (иначе dataclass_transform
+# требует обязательные поля как аргументы, хотя pydantic-settings берёт их из окружения).
+plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
 # Библиотеки без полных py.typed-аннотаций: strict-проверка применяется к нашему коду.

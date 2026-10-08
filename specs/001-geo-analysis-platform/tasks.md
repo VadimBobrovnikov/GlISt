@@ -49,7 +49,7 @@
 
 **⚠️ CRITICAL**: ни одна задача Phase 3+ не начинается до завершения этой фазы
 
-- [ ] T011 Настроить конфигурацию приложения `backend/src/glist/config.py`: модель `pydantic-settings` со всеми переменными из `.env.example`; секреты только из окружения (Принцип IX)
+- [X] T011 Настроить конфигурацию приложения `backend/src/glist/config.py`: модель `pydantic-settings` со всеми переменными из `.env.example`; секреты только из окружения (Принцип IX)
 - [ ] T012 Создать доступ к БД `backend/src/glist/db/session.py`: async engine, `async_sessionmaker`, зависимость сессии для FastAPI и для ARQ-задач
 - [ ] T013 Создать SQLModel-модели `user`, `query`, `clarification_request`, `analysis_run` в `backend/src/glist/db/models.py` с ограничениями из [data-model.md](./data-model.md): `status` ∈ `ожидает|в обработке|завершён|не прошёл проверку|данные недоступны|ошибка`, `attempt_count` CHECK `between 0 and 1`, `parent_run_id`, `reused_result_id`, `trace_id NOT NULL`, `settings_hash`, `params_hash`, `seed`, `rag_index_version`, `is_reference`, `is_pinned`, `retention_until`, `purge_notice_at`; индексы `(status, queue_position)`, `(query_id, created_at)`, `(params_hash)`
 - [ ] T014 Создать SQLModel-модели `run_stage`, `validation_rejection`, `settings_profile` в `backend/src/glist/db/models.py`: `run_stage.description NOT NULL` (Принцип III), UNIQUE(`run_id`,`seq`); `validation_rejection.attempt_no` ∈ 1…2, `category` ∈ `analysis_error|data_quality`, `reasons` jsonb NOT NULL, `fixes_applied` jsonb, UNIQUE(`run_id`,`attempt_no`); `settings_profile` с PK `settings_hash` и неизменяемым `values` (Принцип II)
