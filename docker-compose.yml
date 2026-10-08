@@ -20,7 +20,7 @@ services:
     build:
       context: ./backend/deploy
       dockerfile: postgis-pgvector.Dockerfile
-    image: glist/postgis-pgvector:16-3.5-pgvector
+    image: glist/postgis-pgvector:16-3.6-pgvector
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-glist}
