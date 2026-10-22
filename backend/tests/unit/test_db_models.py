@@ -1,17 +1,21 @@
-"""Unit-тесты моделей БД (задача T013).
+"""Unit-тесты моделей БД (задача T015).
 
 Проверяют CHECK-ограничения, внешние ключи и индексы моделей
-user, query, clarification_request, analysis_run.
+user, query, clarification_request, analysis_run, run_stage,
+validation_rejection, settings_profile, geocode_cache,
+area_of_interest, observation_dataset, run_dataset.
 """
 
 from __future__ import annotations
 
+import decimal
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 import pytest
-from sqlalchemy.exc import IntegrityError
+from geoalchemy2 import WKTElement
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -22,8 +26,12 @@ from sqlalchemy.pool import NullPool
 
 from glist.db.models import (
     AnalysisRun,
+    AreaOfInterest,
     ClarificationRequest,
+    GeocodeCache,
+    ObservationDataset,
     Query,
+    RunDataset,
     RunStage,
     SettingsProfile,
     User,
@@ -32,20 +40,28 @@ from glist.db.models import (
 
 
 async def _create_tables(engine: AsyncEngine) -> None:
-    """Создаёт таблицы user, query, clarification_request, settings_profile.
+    """Создаёт таблицы user, query, clarification_request, settings_profile,
+    geocode_cache, observation_dataset, area_of_interest.
 
     analysis_run не создаётся: ссылается на analysis_result.id (появится в T016).
-    run_stage и validation_rejection ссылаются на analysis_run.id — тоже не создаются.
+    run_stage, validation_rejection и run_dataset ссылаются на analysis_run.id —
+    тоже не создаются.
     """
     async with engine.begin() as connection:
         await connection.run_sync(cast(Any, User).__table__.create)
         await connection.run_sync(cast(Any, Query).__table__.create)
         await connection.run_sync(cast(Any, ClarificationRequest).__table__.create)
         await connection.run_sync(cast(Any, SettingsProfile).__table__.create)
+        await connection.run_sync(cast(Any, GeocodeCache).__table__.create)
+        await connection.run_sync(cast(Any, ObservationDataset).__table__.create)
+        await connection.run_sync(cast(Any, AreaOfInterest).__table__.create)
 
 
 async def _drop_tables(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:
+        await connection.run_sync(cast(Any, AreaOfInterest).__table__.drop)
+        await connection.run_sync(cast(Any, ObservationDataset).__table__.drop)
+        await connection.run_sync(cast(Any, GeocodeCache).__table__.drop)
         await connection.run_sync(cast(Any, SettingsProfile).__table__.drop)
         await connection.run_sync(cast(Any, ClarificationRequest).__table__.drop)
         await connection.run_sync(cast(Any, Query).__table__.drop)
@@ -610,4 +626,447 @@ def test_settings_profile_values_not_null_check() -> None:
         if getattr(c, "name", None) == "settings_profile_values_not_null"
     ]
     assert len(constraints) == 1
+
+
+# ---------------------------------------------------------------------------
+# GeocodeCache — интеграционные тесты (раздел 8)
+# ---------------------------------------------------------------------------
+
+
+async def test_geocode_cache_create_valid(db_session: AsyncSession, schema: None) -> None:
+    gc = GeocodeCache(
+        query_normalized="москва",
+        provider="nominatim",
+        payload={"raw": "{\"display_name\":\"Москва, Россия\"}"},
+        geometry=WKTElement("POINT(37.6173 55.7558)", srid=4326),
+        fetched_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        expires_at=datetime(2024, 1, 8, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(gc)
+    await db_session.flush()
+    assert gc.id is not None
+
+
+async def test_geocode_cache_unique_query_provider(db_session: AsyncSession, schema: None) -> None:
+    gc1 = GeocodeCache(
+        query_normalized="москва",
+        provider="nominatim",
+        payload={"raw": "a"},
+        geometry=None,
+        fetched_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        expires_at=datetime(2024, 1, 8, 0, 0, 0, tzinfo=UTC),
+    )
+    gc2 = GeocodeCache(
+        query_normalized="москва",
+        provider="nominatim",
+        payload={"raw": "b"},
+        geometry=None,
+        fetched_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        expires_at=datetime(2024, 1, 8, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(gc1)
+    await db_session.flush()
+    db_session.add(gc2)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+# ---------------------------------------------------------------------------
+# GeocodeCache — мета-тесты определений
+# ---------------------------------------------------------------------------
+
+
+def test_geocode_cache_unique_query_provider_index() -> None:
+    mapper = cast(Any, inspect(GeocodeCache))
+    index_names = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_geocode_cache_query_provider" in index_names
+
+
+def test_geocode_cache_geometry_gist_index() -> None:
+    mapper = cast(Any, inspect(GeocodeCache))
+    index_names = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_geocode_cache_geometry" in index_names
+
+
+# ---------------------------------------------------------------------------
+# ObservationDataset — интеграционные тесты (раздел 10)
+# ---------------------------------------------------------------------------
+
+
+async def test_observation_dataset_create_valid(db_session: AsyncSession, schema: None) -> None:
+    obs = ObservationDataset(
+        source="earth_search",
+        collection="sentinel-2-l2a",
+        sensor="MSI",
+        scene_id="S2A_MSIL2A_20240101T000000_N0000_R000_T00000",
+        acquired_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        cloud_cover=decimal.Decimal("15.5"),
+        resolution_m=decimal.Decimal("10.0"),
+        extent=WKTElement(
+            "POLYGON((37.0 55.0, 38.0 55.0, 38.0 56.0, 37.0 56.0, 37.0 55.0))",
+            srid=4326,
+        ),
+        asset_url="https://example.com/asset.tif",
+        checksum="sha256:abc123",
+        is_accepted=True,
+        rejection_reason=None,
+    )
+    db_session.add(obs)
+    await db_session.flush()
+    assert obs.id is not None
+
+
+async def test_observation_dataset_unique_source_collection_scene(
+    db_session: AsyncSession, schema: None
+) -> None:
+    obs1 = ObservationDataset(
+        source="earth_search",
+        collection="sentinel-2-l2a",
+        sensor="MSI",
+        scene_id="S2A_SCENE_001",
+        acquired_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        cloud_cover=decimal.Decimal("10.0"),
+        resolution_m=decimal.Decimal("10.0"),
+        extent=WKTElement("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", srid=4326),
+        asset_url="https://example.com/a.tif",
+        is_accepted=True,
+    )
+    obs2 = ObservationDataset(
+        source="earth_search",
+        collection="sentinel-2-l2a",
+        sensor="MSI",
+        scene_id="S2A_SCENE_001",
+        acquired_at=datetime(2024, 1, 2, 0, 0, 0, tzinfo=UTC),
+        cloud_cover=decimal.Decimal("10.0"),
+        resolution_m=decimal.Decimal("10.0"),
+        extent=WKTElement("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", srid=4326),
+        asset_url="https://example.com/b.tif",
+        is_accepted=True,
+    )
+    db_session.add(obs1)
+    await db_session.flush()
+    db_session.add(obs2)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+async def test_observation_dataset_cloud_cover_out_of_range(
+    db_session: AsyncSession, schema: None
+) -> None:
+    obs = ObservationDataset(
+        source="earth_search",
+        collection="sentinel-2-l2a",
+        sensor="MSI",
+        scene_id="S2A_CLOUD_BAD",
+        acquired_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        cloud_cover=decimal.Decimal("101.0"),
+        resolution_m=decimal.Decimal("10.0"),
+        extent=WKTElement("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))", srid=4326),
+        asset_url="https://example.com/a.tif",
+        is_accepted=False,
+        rejection_reason="too cloudy",
+    )
+    db_session.add(obs)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+# ---------------------------------------------------------------------------
+# ObservationDataset — мета-тесты определений
+# ---------------------------------------------------------------------------
+
+
+def test_observation_dataset_unique_source_collection_scene_index() -> None:
+    mapper = cast(Any, inspect(ObservationDataset))
+    index_names = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_obs_source_collection_scene" in index_names
+
+
+def test_observation_dataset_extent_gist_index() -> None:
+    mapper = cast(Any, inspect(ObservationDataset))
+    index_names = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_obs_extent" in index_names
+
+
+def test_observation_dataset_extent_srid_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, ObservationDataset).__table__.constraints
+        if getattr(c, "name", None) == "obs_extent_srid_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    assert "ST_SRID(extent) = 4326" in sql
+
+
+def test_observation_dataset_cloud_cover_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, ObservationDataset).__table__.constraints
+        if getattr(c, "name", None) == "obs_cloud_cover_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    assert "between 0 and 100" in sql
+
+
+def test_observation_dataset_source_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, ObservationDataset).__table__.constraints
+        if getattr(c, "name", None) == "obs_source_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    for source in ("earth_search", "planetary_computer", "copernicus"):
+        assert source in sql
+
+
+def test_observation_dataset_sensor_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, ObservationDataset).__table__.constraints
+        if getattr(c, "name", None) == "obs_sensor_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    for sensor in ("MSI", "OLI/TIRS"):
+        assert sensor in sql
+
+
+# ---------------------------------------------------------------------------
+# AreaOfInterest — интеграционные тесты (раздел 9)
+# ---------------------------------------------------------------------------
+
+
+async def test_area_of_interest_create_valid(
+    db_session: AsyncSession, schema: None
+) -> None:
+    gc = GeocodeCache(
+        query_normalized="москва",
+        provider="nominatim",
+        payload={"raw": "{}"},
+        geometry=None,
+        fetched_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        expires_at=datetime(2024, 1, 8, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(gc)
+    await db_session.flush()
+
+    aoi = AreaOfInterest(
+        name="Москва",
+        name_source="query_text",
+        aoi_type="admin",
+        geocode_cache_id=gc.id,
+        boundary=WKTElement(
+            "POLYGON((37.0 55.0, 38.0 55.0, 38.0 56.0, 37.0 56.0, 37.0 55.0))",
+            srid=4326,
+        ),
+        validity_fixed=False,
+        buffer_m=None,
+        area_km2=decimal.Decimal("100.5"),
+        created_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(aoi)
+    await db_session.flush()
+    assert aoi.id is not None
+
+
+async def test_area_of_interest_buffer_requires_buffer_m(
+    db_session: AsyncSession, schema: None
+) -> None:
+    gc = GeocodeCache(
+        query_normalized="москва",
+        provider="nominatim",
+        payload={"raw": "{}"},
+        geometry=None,
+        fetched_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        expires_at=datetime(2024, 1, 8, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(gc)
+    await db_session.flush()
+
+    aoi = AreaOfInterest(
+        name="Точка",
+        name_source="query_text",
+        aoi_type="buffer",
+        geocode_cache_id=None,
+        boundary=WKTElement("POINT(37.6173 55.7558)", srid=4326),
+        validity_fixed=False,
+        buffer_m=None,
+        area_km2=decimal.Decimal("0.0"),
+        created_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(aoi)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+async def test_area_of_interest_invalid_srid_rejected(
+    db_session: AsyncSession, schema: None
+) -> None:
+    gc = GeocodeCache(
+        query_normalized="москва",
+        provider="nominatim",
+        payload={"raw": "{}"},
+        geometry=None,
+        fetched_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        expires_at=datetime(2024, 1, 8, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(gc)
+    await db_session.flush()
+
+    aoi = AreaOfInterest(
+        name="Плохая СРИД",
+        name_source="query_text",
+        aoi_type="admin",
+        geocode_cache_id=gc.id,
+        boundary=WKTElement("POINT(37.6173 55.7558)", srid=3857),
+        validity_fixed=False,
+        buffer_m=None,
+        area_km2=decimal.Decimal("0.0"),
+        created_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(aoi)
+    with pytest.raises(SQLAlchemyError):
+        await db_session.flush()
+
+
+async def test_area_of_interest_invalid_geometry_rejected(
+    db_session: AsyncSession, schema: None
+) -> None:
+    gc = GeocodeCache(
+        query_normalized="москва",
+        provider="nominatim",
+        payload={"raw": "{}"},
+        geometry=None,
+        fetched_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+        expires_at=datetime(2024, 1, 8, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(gc)
+    await db_session.flush()
+
+    aoi = AreaOfInterest(
+        name="Невалидная геометрия",
+        name_source="query_text",
+        aoi_type="admin",
+        geocode_cache_id=gc.id,
+        boundary=WKTElement("POLYGON((0 0, 1 1, 0 0))", srid=4326),
+        validity_fixed=False,
+        buffer_m=None,
+        area_km2=decimal.Decimal("0.0"),
+        created_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+    )
+    db_session.add(aoi)
+    with pytest.raises(SQLAlchemyError):
+        await db_session.flush()
+
+
+# ---------------------------------------------------------------------------
+# AreaOfInterest — мета-тесты определений
+# ---------------------------------------------------------------------------
+
+
+def test_area_of_interest_boundary_gist_index() -> None:
+    mapper = cast(Any, inspect(AreaOfInterest))
+    index_names = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_aoi_boundary" in index_names
+
+
+def test_area_of_interest_boundary_srid_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, AreaOfInterest).__table__.constraints
+        if getattr(c, "name", None) == "aoi_boundary_srid_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    assert "ST_SRID(boundary) = 4326" in sql
+
+
+def test_area_of_interest_boundary_valid_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, AreaOfInterest).__table__.constraints
+        if getattr(c, "name", None) == "aoi_boundary_valid_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    assert "ST_IsValid(boundary)" in sql
+
+
+def test_area_of_interest_buffer_required_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, AreaOfInterest).__table__.constraints
+        if getattr(c, "name", None) == "aoi_buffer_required_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    assert "buffer" in sql
+
+
+def test_area_of_interest_name_source_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, AreaOfInterest).__table__.constraints
+        if getattr(c, "name", None) == "aoi_name_source_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    assert "query_text" in sql
+    assert "generated" in sql
+
+
+def test_area_of_interest_type_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, AreaOfInterest).__table__.constraints
+        if getattr(c, "name", None) == "aoi_type_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    for aoi_type in ("admin", "poi", "buffer"):
+        assert aoi_type in sql
+
+
+def test_area_of_interest_fk_geocode_cache() -> None:
+    mapper = inspect(AreaOfInterest)
+    col = mapper.columns["geocode_cache_id"]
+    assert any("geocode_cache" in str(fk.target_fullname) for fk in col.foreign_keys)
+
+
+# ---------------------------------------------------------------------------
+# RunDataset — мета-тесты определений (без вставки, т.к. ссылается на analysis_run.id)
+# ---------------------------------------------------------------------------
+
+
+def test_run_dataset_pk_composite() -> None:
+    mapper = inspect(RunDataset)
+    pk_cols = [c.name for c in mapper.primary_key]
+    assert set(pk_cols) == {"run_id", "dataset_id", "role"}
+
+
+def test_run_dataset_fk_analysis_run() -> None:
+    mapper = inspect(RunDataset)
+    col = mapper.columns["run_id"]
+    assert any("analysis_run" in str(fk.target_fullname) for fk in col.foreign_keys)
+
+
+def test_run_dataset_fk_observation_dataset() -> None:
+    mapper = inspect(RunDataset)
+    col = mapper.columns["dataset_id"]
+    assert any("observation_dataset" in str(fk.target_fullname) for fk in col.foreign_keys)
+
+
+def test_run_dataset_role_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, RunDataset).__table__.constraints
+        if getattr(c, "name", None) == "run_dataset_role_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    for role in ("start_period", "end_period"):
+        assert role in sql
 

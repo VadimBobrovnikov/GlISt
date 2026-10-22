@@ -26,6 +26,8 @@ dependencies = [
     "asyncpg>=0.29",
     # Python-binding для pgvector: модели эмбеддингов (data-model.md, RAG).
     "pgvector>=0.3",
+    # PostGIS-типы для колонок geometry (разделы 8–11 data-model.md).
+    "geoalchemy2",
 ]
 
 [dependency-groups]

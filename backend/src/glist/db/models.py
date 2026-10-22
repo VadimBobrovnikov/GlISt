@@ -1,16 +1,20 @@
-"""SQLModel-модели данных (задача T013).
+"""SQLModel-модели данных (задача T015).
 
-Разделы 1–4 спецификации data-model.md:
-user, query, clarification_request, analysis_run.
+Разделы 1–4, 8–11 спецификации data-model.md:
+user, query, clarification_request, analysis_run, run_stage,
+validation_rejection, settings_profile, geocode_cache,
+area_of_interest, observation_dataset, run_dataset.
 """
 
 from __future__ import annotations
 
+import decimal
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, Index, SmallInteger, text
+from geoalchemy2 import Geometry
+from sqlalchemy import CheckConstraint, Index, Numeric, SmallInteger, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -251,4 +255,150 @@ class SettingsProfile(SQLModel, table=True):
     __table_args__ = (
         CheckConstraint("length(name) > 0", name="settings_profile_name_not_empty"),
         CheckConstraint("values IS NOT NULL", name="settings_profile_values_not_null"),
+    )
+
+
+class GeocodeCache(SQLModel, table=True):
+    """Кэш геокодирования (раздел 8 data-model.md)."""
+
+    __tablename__ = "geocode_cache"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    query_normalized: str = Field(nullable=False)
+    provider: str = Field(nullable=False)
+    payload: dict[str, Any] = Field(sa_type=JSONB, nullable=False)
+    geometry: Any = Field(
+        sa_type=Geometry(geometry_type="Geometry", srid=4326), nullable=True
+    )
+    fetched_at: datetime = Field(nullable=False)
+    expires_at: datetime = Field(nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_geocode_cache_query_provider",
+            "query_normalized",
+            "provider",
+            unique=True,
+        ),
+        Index("ix_geocode_cache_geometry", "geometry", postgresql_using="gist"),
+    )
+
+
+class AreaOfInterest(SQLModel, table=True):
+    """Область интереса (раздел 9 data-model.md)."""
+
+    __tablename__ = "area_of_interest"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    name: str = Field(nullable=False)
+    name_source: str = Field(nullable=False)
+    aoi_type: str = Field(nullable=False)
+    geocode_cache_id: uuid.UUID | None = Field(
+        default=None, foreign_key="geocode_cache.id"
+    )
+    boundary: Any = Field(
+        sa_type=Geometry(geometry_type="Geometry", srid=4326), nullable=False
+    )
+    validity_fixed: bool = Field(default=False, nullable=False)
+    buffer_m: int | None = Field(default=None)
+    area_km2: decimal.Decimal = Field(sa_type=Numeric(12, 4), nullable=False)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    __table_args__ = (
+        CheckConstraint(
+            "ST_SRID(boundary) = 4326", name="aoi_boundary_srid_check"
+        ),
+        CheckConstraint(
+            "ST_IsValid(boundary)", name="aoi_boundary_valid_check"
+        ),
+        CheckConstraint(
+            "aoi_type != 'buffer' OR buffer_m IS NOT NULL",
+            name="aoi_buffer_required_check",
+        ),
+        CheckConstraint(
+            "name_source IN ('query_text', 'generated')",
+            name="aoi_name_source_check",
+        ),
+        CheckConstraint(
+            "aoi_type IN ('admin', 'poi', 'buffer')", name="aoi_type_check"
+        ),
+        Index("ix_aoi_boundary", "boundary", postgresql_using="gist"),
+        Index("ix_aoi_name", "name"),
+    )
+
+
+class ObservationDataset(SQLModel, table=True):
+    """Наблюдаемый набор данных (раздел 10 data-model.md)."""
+
+    __tablename__ = "observation_dataset"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    source: str = Field(nullable=False)
+    collection: str = Field(nullable=False)
+    sensor: str = Field(nullable=False)
+    scene_id: str = Field(nullable=False)
+    acquired_at: datetime = Field(nullable=False)
+    cloud_cover: decimal.Decimal = Field(sa_type=Numeric(5, 2), nullable=False)
+    resolution_m: decimal.Decimal = Field(sa_type=Numeric(6, 2), nullable=False)
+    extent: Any = Field(
+        sa_type=Geometry(geometry_type="Polygon", srid=4326), nullable=False
+    )
+    asset_url: str = Field(nullable=False)
+    checksum: str | None = Field(default=None)
+    is_accepted: bool = Field(nullable=False)
+    rejection_reason: str | None = Field(default=None)
+
+    __table_args__ = (
+        CheckConstraint(
+            "cloud_cover between 0 and 100", name="obs_cloud_cover_check"
+        ),
+        CheckConstraint(
+            "ST_SRID(extent) = 4326", name="obs_extent_srid_check"
+        ),
+        CheckConstraint(
+            "source IN ('earth_search', 'planetary_computer', 'copernicus')",
+            name="obs_source_check",
+        ),
+        CheckConstraint(
+            "collection IN ('sentinel-2-l2a', 'landsat-c2-l2')",
+            name="obs_collection_check",
+        ),
+        CheckConstraint(
+            "sensor IN ('MSI', 'OLI/TIRS')", name="obs_sensor_check"
+        ),
+        Index("ix_obs_collection_acquired", "collection", "acquired_at"),
+        Index(
+            "ix_obs_source_collection_scene",
+            "source",
+            "collection",
+            "scene_id",
+            unique=True,
+        ),
+        Index("ix_obs_extent", "extent", postgresql_using="gist"),
+    )
+
+
+class RunDataset(SQLModel, table=True):
+    """Связь запуска с набором данных (раздел 11 data-model.md)."""
+
+    __tablename__ = "run_dataset"
+
+    run_id: uuid.UUID = Field(
+        foreign_key="analysis_run.id",
+        nullable=False,
+        ondelete="CASCADE",
+        primary_key=True,
+    )
+    dataset_id: uuid.UUID = Field(
+        foreign_key="observation_dataset.id",
+        nullable=False,
+        primary_key=True,
+    )
+    role: str = Field(nullable=False, primary_key=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('start_period', 'end_period')",
+            name="run_dataset_role_check",
+        ),
     )
