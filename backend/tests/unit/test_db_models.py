@@ -24,24 +24,29 @@ from glist.db.models import (
     AnalysisRun,
     ClarificationRequest,
     Query,
+    RunStage,
+    SettingsProfile,
     User,
+    ValidationRejection,
 )
 
 
 async def _create_tables(engine: AsyncEngine) -> None:
-    """Создаёт таблицы user, query, clarification_request.
+    """Создаёт таблицы user, query, clarification_request, settings_profile.
 
-    analysis_run не создаётся: ссылается на analysis_result.id и
-    settings_profile.settings_hash, которые появятся в T014/T016.
+    analysis_run не создаётся: ссылается на analysis_result.id (появится в T016).
+    run_stage и validation_rejection ссылаются на analysis_run.id — тоже не создаются.
     """
     async with engine.begin() as connection:
         await connection.run_sync(cast(Any, User).__table__.create)
         await connection.run_sync(cast(Any, Query).__table__.create)
         await connection.run_sync(cast(Any, ClarificationRequest).__table__.create)
+        await connection.run_sync(cast(Any, SettingsProfile).__table__.create)
 
 
 async def _drop_tables(engine: AsyncEngine) -> None:
     async with engine.begin() as connection:
+        await connection.run_sync(cast(Any, SettingsProfile).__table__.drop)
         await connection.run_sync(cast(Any, ClarificationRequest).__table__.drop)
         await connection.run_sync(cast(Any, Query).__table__.drop)
         await connection.run_sync(cast(Any, User).__table__.drop)
@@ -418,4 +423,191 @@ async def test_query_parent_query_self_reference(db_session: AsyncSession, schem
     db_session.add(child)
     await db_session.flush()
     assert child.parent_query_id == parent.id
+
+
+# ---------------------------------------------------------------------------
+# SettingsProfile — интеграционные тесты (таблица создаётся в схеме)
+# ---------------------------------------------------------------------------
+
+
+async def test_settings_profile_create_valid(db_session: AsyncSession, schema: None) -> None:
+    profile = SettingsProfile(
+        settings_hash="abc123def456",
+        name="default",
+        values={"ndvi_threshold": 0.5, "min_area_m2": 1000},
+    )
+    db_session.add(profile)
+    await db_session.flush()
+    assert profile.settings_hash == "abc123def456"
+    assert profile.name == "default"
+    assert profile.values == {"ndvi_threshold": 0.5, "min_area_m2": 1000}
+    assert isinstance(profile.created_at, datetime)
+
+
+async def test_settings_profile_name_required(db_session: AsyncSession, schema: None) -> None:
+    profile = SettingsProfile(
+        settings_hash="hash-no-name",
+        name="",
+        values={"key": "value"},
+    )
+    db_session.add(profile)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+async def test_settings_profile_pk_duplicate(db_session: AsyncSession, schema: None) -> None:
+    p1 = SettingsProfile(settings_hash="dup-hash", name="a", values={"x": 1})
+    p2 = SettingsProfile(settings_hash="dup-hash", name="b", values={"y": 2})
+    db_session.add(p1)
+    await db_session.flush()
+    db_session.add(p2)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+# ---------------------------------------------------------------------------
+# RunStage — мета-тесты определений (без вставки, т.к. ссылается на analysis_run.id)
+# ---------------------------------------------------------------------------
+
+
+def test_run_stage_fk_analysis_run() -> None:
+    mapper = inspect(RunStage)
+    run_col = mapper.columns["run_id"]
+    assert any("analysis_run" in str(fk.target_fullname) for fk in run_col.foreign_keys)
+
+
+def test_run_stage_unique_run_seq() -> None:
+    mapper = cast(Any, inspect(RunStage))
+    index_names = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_run_stage_run_seq" in index_names
+
+
+def test_run_stage_index_run_status() -> None:
+    mapper = cast(Any, inspect(RunStage))
+    index_names = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_run_stage_run_status" in index_names
+
+
+def test_run_stage_agent_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, RunStage).__table__.constraints
+        if getattr(c, "name", None) == "run_stage_agent_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    for agent in ("researcher", "analyst", "visualizer", "validator"):
+        assert agent in sql
+
+
+def test_run_stage_status_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, RunStage).__table__.constraints
+        if getattr(c, "name", None) == "run_stage_status_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    for status in ("running", "completed", "failed", "skipped"):
+        assert status in sql
+
+
+def test_run_stage_description_not_null() -> None:
+    mapper = inspect(RunStage)
+    column = mapper.columns["description"]
+    assert column.nullable is False
+
+
+def test_run_stage_description_not_empty_check() -> None:
+    constraints = [
+        c
+        for c in cast(Any, RunStage).__table__.constraints
+        if getattr(c, "name", None) == "run_stage_description_not_empty"
+    ]
+    assert len(constraints) == 1
+
+
+# ---------------------------------------------------------------------------
+# ValidationRejection — мета-тесты определений (без вставки, т.к. ссылается на analysis_run.id)
+# ---------------------------------------------------------------------------
+
+
+def test_validation_rejection_fk_analysis_run() -> None:
+    mapper = inspect(ValidationRejection)
+    run_col = mapper.columns["run_id"]
+    assert any("analysis_run" in str(fk.target_fullname) for fk in run_col.foreign_keys)
+
+
+def test_validation_rejection_unique_run_attempt() -> None:
+    mapper = cast(Any, inspect(ValidationRejection))
+    index_names = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_validation_rejection_run_attempt" in index_names
+
+
+def test_validation_rejection_attempt_no_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, ValidationRejection).__table__.constraints
+        if getattr(c, "name", None) == "validation_rejection_attempt_no_check"
+    ]
+    assert len(constraints) == 1
+
+
+def test_validation_rejection_category_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, ValidationRejection).__table__.constraints
+        if getattr(c, "name", None) == "validation_rejection_category_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    for category in ("analysis_error", "data_quality"):
+        assert category in sql
+
+
+def test_validation_rejection_reasons_not_null() -> None:
+    mapper = inspect(ValidationRejection)
+    column = mapper.columns["reasons"]
+    assert column.nullable is False
+
+
+# ---------------------------------------------------------------------------
+# SettingsProfile — мета-тесты определений
+# ---------------------------------------------------------------------------
+
+
+def test_settings_profile_pk_settings_hash() -> None:
+    mapper = inspect(SettingsProfile)
+    pk_cols = [c.name for c in mapper.primary_key]
+    assert pk_cols == ["settings_hash"]
+
+
+def test_settings_profile_name_not_null() -> None:
+    mapper = inspect(SettingsProfile)
+    column = mapper.columns["name"]
+    assert column.nullable is False
+
+
+def test_settings_profile_values_not_null() -> None:
+    mapper = inspect(SettingsProfile)
+    column = mapper.columns["values"]
+    assert column.nullable is False
+
+
+def test_settings_profile_name_not_empty_check() -> None:
+    constraints = [
+        c
+        for c in cast(Any, SettingsProfile).__table__.constraints
+        if getattr(c, "name", None) == "settings_profile_name_not_empty"
+    ]
+    assert len(constraints) == 1
+
+
+def test_settings_profile_values_not_null_check() -> None:
+    constraints = [
+        c
+        for c in cast(Any, SettingsProfile).__table__.constraints
+        if getattr(c, "name", None) == "settings_profile_values_not_null"
+    ]
+    assert len(constraints) == 1
 

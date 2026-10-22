@@ -10,7 +10,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import CheckConstraint, Index, text
+from sqlalchemy import CheckConstraint, Index, SmallInteger, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -164,4 +164,91 @@ class AnalysisRun(SQLModel, table=True):
             "retention_until",
             postgresql_where=text("retention_until is not null"),
         ),
+    )
+
+
+class RunStage(SQLModel, table=True):
+    """Этап запуска анализа (раздел 5 data-model.md)."""
+
+    __tablename__ = "run_stage"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    run_id: uuid.UUID = Field(
+        foreign_key="analysis_run.id", nullable=False, ondelete="CASCADE"
+    )
+    seq: int = Field(sa_type=SmallInteger, nullable=False)
+    attempt_no: int = Field(
+        sa_type=SmallInteger, default=0, nullable=False
+    )
+    agent: str = Field(nullable=False)
+    stage_code: str = Field(nullable=False)
+    title: str = Field(nullable=False)
+    description: str = Field(nullable=False)
+    status: str = Field(nullable=False)
+    details: dict[str, Any] | None = Field(default=None, sa_type=JSONB)
+    started_at: datetime | None = Field(default=None)
+    finished_at: datetime | None = Field(default=None)
+
+    __table_args__ = (
+        CheckConstraint(
+            "agent IN ('researcher', 'analyst', 'visualizer', 'validator')",
+            name="run_stage_agent_check",
+        ),
+        CheckConstraint(
+            "status IN ('running', 'completed', 'failed', 'skipped')",
+            name="run_stage_status_check",
+        ),
+        CheckConstraint("length(description) > 0", name="run_stage_description_not_empty"),
+        Index("ix_run_stage_run_seq", "run_id", "seq", unique=True),
+        Index("ix_run_stage_run_status", "run_id", "status"),
+    )
+
+
+class ValidationRejection(SQLModel, table=True):
+    """Отклонение валидатором (раздел 6 data-model.md)."""
+
+    __tablename__ = "validation_rejection"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    run_id: uuid.UUID = Field(
+        foreign_key="analysis_run.id", nullable=False, ondelete="CASCADE"
+    )
+    attempt_no: int = Field(sa_type=SmallInteger, nullable=False)
+    category: str = Field(nullable=False)
+    reasons: list[dict[str, Any]] | None = Field(
+        default=None, sa_type=JSONB, nullable=False
+    )
+    fixes_applied: dict[str, Any] | None = Field(default=None, sa_type=JSONB)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_no between 1 and 2", name="validation_rejection_attempt_no_check"
+        ),
+        CheckConstraint(
+            "category IN ('analysis_error', 'data_quality')",
+            name="validation_rejection_category_check",
+        ),
+        Index(
+            "ix_validation_rejection_run_attempt",
+            "run_id",
+            "attempt_no",
+            unique=True,
+        ),
+    )
+
+
+class SettingsProfile(SQLModel, table=True):
+    """Профиль настроек анализа (раздел 7 data-model.md)."""
+
+    __tablename__ = "settings_profile"
+
+    settings_hash: str = Field(primary_key=True)
+    name: str = Field(nullable=False)
+    values: dict[str, Any] = Field(sa_type=JSONB, nullable=False)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    __table_args__ = (
+        CheckConstraint("length(name) > 0", name="settings_profile_name_not_empty"),
+        CheckConstraint("values IS NOT NULL", name="settings_profile_values_not_null"),
     )
