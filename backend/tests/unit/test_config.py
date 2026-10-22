@@ -123,8 +123,10 @@ def test_unknown_environment_variables_are_ignored(settings_env: dict[str, str])
     assert _settings(SOME_SERVICE_INTERNAL_VAR="value").llm_provider == "openai"
 
 
-def test_get_settings_is_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    for key, value in _BASE_ENV.items():
+def test_get_settings_is_cached(
+    monkeypatch: pytest.MonkeyPatch, required_env: dict[str, str]
+) -> None:
+    for key, value in required_env.items():
         monkeypatch.setenv(key, value)
     get_settings.cache_clear()
     try:
