@@ -1,16 +1,17 @@
-"""Unit-тесты моделей БД (задача T015).
+"""Unit-тесты моделей БД (задача T016).
 
 Проверяют CHECK-ограничения, внешние ключи и индексы моделей
 user, query, clarification_request, analysis_run, run_stage,
 validation_rejection, settings_profile, geocode_cache,
-area_of_interest, observation_dataset, run_dataset.
+area_of_interest, observation_dataset, run_dataset,
+analysis_result, result_territory, change_zone.
 """
 
 from __future__ import annotations
 
 import decimal
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, cast
 
 import pytest
@@ -23,14 +24,18 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.inspection import inspect
 from sqlalchemy.pool import NullPool
+from sqlmodel import SQLModel
 
 from glist.db.models import (
+    AnalysisResult,
     AnalysisRun,
     AreaOfInterest,
+    ChangeZone,
     ClarificationRequest,
     GeocodeCache,
     ObservationDataset,
     Query,
+    ResultTerritory,
     RunDataset,
     RunStage,
     SettingsProfile,
@@ -40,32 +45,26 @@ from glist.db.models import (
 
 
 async def _create_tables(engine: AsyncEngine) -> None:
-    """Создаёт таблицы user, query, clarification_request, settings_profile,
-    geocode_cache, observation_dataset, area_of_interest.
+    """Создаёт в тестовой БД все таблицы моделей SQLModel.
 
-    analysis_run не создаётся: ссылается на analysis_result.id (появится в T016).
-    run_stage, validation_rejection и run_dataset ссылаются на analysis_run.id —
-    тоже не создаются.
+    Порядок таблиц и внешних ключей определяет сам SQLAlchemy по зависимостям.
+    Цикл AnalysisRun -> AnalysisResult -> AnalysisRun разорван внешним ключом
+    ``ForeignKey("analysis_result.id", use_alter=True)``: такой FK не попадает в
+    ``CREATE TABLE`` и добавляется отдельным ``ALTER TABLE`` после создания
+    обеих таблиц (см. ``glist.db.models.AnalysisRun.reused_result_id``).
     """
     async with engine.begin() as connection:
-        await connection.run_sync(cast(Any, User).__table__.create)
-        await connection.run_sync(cast(Any, Query).__table__.create)
-        await connection.run_sync(cast(Any, ClarificationRequest).__table__.create)
-        await connection.run_sync(cast(Any, SettingsProfile).__table__.create)
-        await connection.run_sync(cast(Any, GeocodeCache).__table__.create)
-        await connection.run_sync(cast(Any, ObservationDataset).__table__.create)
-        await connection.run_sync(cast(Any, AreaOfInterest).__table__.create)
+        await connection.run_sync(
+            lambda sync_connection: SQLModel.metadata.create_all(sync_connection, checkfirst=True)
+        )
 
 
 async def _drop_tables(engine: AsyncEngine) -> None:
+    """Удаляет созданные таблицы (в порядке зависимостей — силами SQLAlchemy)."""
     async with engine.begin() as connection:
-        await connection.run_sync(cast(Any, AreaOfInterest).__table__.drop)
-        await connection.run_sync(cast(Any, ObservationDataset).__table__.drop)
-        await connection.run_sync(cast(Any, GeocodeCache).__table__.drop)
-        await connection.run_sync(cast(Any, SettingsProfile).__table__.drop)
-        await connection.run_sync(cast(Any, ClarificationRequest).__table__.drop)
-        await connection.run_sync(cast(Any, Query).__table__.drop)
-        await connection.run_sync(cast(Any, User).__table__.drop)
+        await connection.run_sync(
+            lambda sync_connection: SQLModel.metadata.drop_all(sync_connection, checkfirst=True)
+        )
 
 
 @pytest.fixture(scope="session")
@@ -309,27 +308,21 @@ async def test_clarification_request_invalid_status_rejected(
 
 def test_analysis_run_status_check_defined() -> None:
     names = {
-        c.name
-        for c in cast(Any, AnalysisRun).__table__.constraints
-        if getattr(c, "name", None)
+        c.name for c in cast(Any, AnalysisRun).__table__.constraints if getattr(c, "name", None)
     }
     assert "analysis_run_status_check" in names
 
 
 def test_analysis_run_attempt_count_check_defined() -> None:
     names = {
-        c.name
-        for c in cast(Any, AnalysisRun).__table__.constraints
-        if getattr(c, "name", None)
+        c.name for c in cast(Any, AnalysisRun).__table__.constraints if getattr(c, "name", None)
     }
     assert "analysis_run_attempt_count_check" in names
 
 
 def test_analysis_run_rejection_category_check_defined() -> None:
     names = {
-        c.name
-        for c in cast(Any, AnalysisRun).__table__.constraints
-        if getattr(c, "name", None)
+        c.name for c in cast(Any, AnalysisRun).__table__.constraints if getattr(c, "name", None)
     }
     assert "analysis_run_rejection_category_check" in names
 
@@ -637,7 +630,7 @@ async def test_geocode_cache_create_valid(db_session: AsyncSession, schema: None
     gc = GeocodeCache(
         query_normalized="москва",
         provider="nominatim",
-        payload={"raw": "{\"display_name\":\"Москва, Россия\"}"},
+        payload={"raw": '{"display_name":"Москва, Россия"}'},
         geometry=WKTElement("POINT(37.6173 55.7558)", srid=4326),
         fetched_at=datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
         expires_at=datetime(2024, 1, 8, 0, 0, 0, tzinfo=UTC),
@@ -839,9 +832,7 @@ def test_observation_dataset_sensor_check_defined() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_area_of_interest_create_valid(
-    db_session: AsyncSession, schema: None
-) -> None:
+async def test_area_of_interest_create_valid(db_session: AsyncSession, schema: None) -> None:
     gc = GeocodeCache(
         query_normalized="москва",
         provider="nominatim",
@@ -1053,12 +1044,6 @@ def test_run_dataset_fk_analysis_run() -> None:
     assert any("analysis_run" in str(fk.target_fullname) for fk in col.foreign_keys)
 
 
-def test_run_dataset_fk_observation_dataset() -> None:
-    mapper = inspect(RunDataset)
-    col = mapper.columns["dataset_id"]
-    assert any("observation_dataset" in str(fk.target_fullname) for fk in col.foreign_keys)
-
-
 def test_run_dataset_role_check_defined() -> None:
     constraints = [
         c
@@ -1070,3 +1055,8 @@ def test_run_dataset_role_check_defined() -> None:
     for role in ("start_period", "end_period"):
         assert role in sql
 
+
+def test_run_dataset_fk_observation_dataset() -> None:
+    mapper = inspect(RunDataset)
+    col = mapper.columns["dataset_id"]
+    assert any("observation_dataset" in str(fk.target_fullname) for fk in col.foreign_keys)

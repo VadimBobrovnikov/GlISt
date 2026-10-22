@@ -86,14 +86,8 @@ async def _count(probe_engine: AsyncEngine) -> int:
 
 
 def test_normalize_dsn_converts_sync_postgres() -> None:
-    assert (
-        normalize_dsn("postgresql://u:p@host:5432/db")
-        == "postgresql+asyncpg://u:p@host:5432/db"
-    )
-    assert (
-        normalize_dsn("postgres://u:p@host:5432/db")
-        == "postgresql+asyncpg://u:p@host:5432/db"
-    )
+    assert normalize_dsn("postgresql://u:p@host:5432/db") == "postgresql+asyncpg://u:p@host:5432/db"
+    assert normalize_dsn("postgres://u:p@host:5432/db") == "postgresql+asyncpg://u:p@host:5432/db"
 
 
 def test_normalize_dsn_keeps_async_and_foreign_schemes() -> None:
