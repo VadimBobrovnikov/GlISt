@@ -17,6 +17,7 @@ import os
 import sys
 from logging.config import fileConfig
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import MetaData, pool
 from sqlalchemy.engine import Connection
@@ -81,20 +82,47 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
 
 
+# PostGIS extension tables that exist in the DB but are not part of our metadata.
+# These should never appear in autogenerate diffs.
+_POSTGIS_SYSTEM_TABLES = frozenset({
+    "spatial_ref_sys",
+    "layer",
+    "topology",
+    "topology_config",
+})
+
+
+def include_object(
+    object: Any,
+    name: str | None,
+    type_: str,
+    reflected: bool,
+    compare_to: Any | None,
+) -> bool:
+    """Exclude PostGIS system tables from autogenerate comparison (T017)."""
+    return not (type_ == "table" and name in _POSTGIS_SYSTEM_TABLES)
+
+
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        include_object=include_object,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
 
 async def run_async_migrations() -> None:
     """Асинхронное подключение: единый путь для upgrade/check/revision."""
-    section = config.get_section(config.get_ini_section())
+    section = config.get_section(config.config_ini_section)
     if section is None:  # pragma: no cover — секция [alembic] существует в ini
         raise RuntimeError("Секция alembic не найдена в alembic.ini")
     connectable: AsyncEngine = async_engine_from_config(
