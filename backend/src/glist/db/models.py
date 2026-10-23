@@ -1,10 +1,11 @@
-"""SQLModel-модели данных (задача T016).
+"""SQLModel-модели данных (задача T017).
 
-Разделы 1–4, 7–14 спецификации data-model.md:
+Разделы 1–4, 7–18 спецификации data-model.md:
 user, query, clarification_request, analysis_run, run_stage,
 validation_rejection, settings_profile, geocode_cache,
 area_of_interest, observation_dataset, run_dataset,
-analysis_result, result_territory, change_zone.
+analysis_result, result_territory, change_zone,
+artifact, artifact_deletion_log, knowledge_document, knowledge_chunk.
 """
 
 from __future__ import annotations
@@ -15,7 +16,17 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from geoalchemy2 import Geometry
-from sqlalchemy import CheckConstraint, ForeignKey, Index, Numeric, SmallInteger, text
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Numeric,
+    SmallInteger,
+    Text,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -484,5 +495,121 @@ class ChangeZone(SQLModel, table=True):
             "ix_change_zone_territory_class",
             "result_territory_id",
             "change_class",
+        ),
+    )
+
+
+class Artifact(SQLModel, table=True):
+    """Артефакт анализа (раздел 15 data-model.md)."""
+
+    __tablename__ = "artifact"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    run_id: uuid.UUID = Field(
+        foreign_key="analysis_run.id",
+        nullable=False,
+        ondelete="CASCADE",
+    )
+    kind: str = Field(nullable=False)
+    uri: str = Field(nullable=False)
+    size_bytes: int = Field(sa_type=BigInteger, nullable=False)
+    checksum: str = Field(nullable=False)
+    is_heavy: bool = Field(nullable=False)
+    retention_until: datetime | None = Field(default=None)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('preview_png', 'final_geotiff', 'geojson', 'pdf', "
+            "'raw_scene', 'intermediate_ndvi', 'intermediate_classified')",
+            name="artifact_kind_check",
+        ),
+        CheckConstraint(
+            "retention_until IS NOT NULL "
+            "AND kind IN ('raw_scene', 'intermediate_ndvi', 'intermediate_classified') "
+            "OR retention_until IS NULL "
+            "AND kind NOT IN ('raw_scene', 'intermediate_ndvi', 'intermediate_classified')",
+            name="artifact_retention_until_check",
+        ),
+        Index("ix_artifact_run_id", "run_id"),
+        Index("ix_artifact_kind", "kind"),
+        Index("ix_artifact_retention_until", "retention_until"),
+    )
+
+
+class ArtifactDeletionLog(SQLModel, table=True):
+    """Журнал удалений артефактов (раздел 16 data-model.md)."""
+
+    __tablename__ = "artifact_deletion_log"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    artifact_id: uuid.UUID = Field(
+        foreign_key="artifact.id",
+        nullable=False,
+        ondelete="CASCADE",
+    )
+    run_id: uuid.UUID = Field(
+        foreign_key="analysis_run.id",
+        nullable=False,
+    )
+    deleted_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    reason: str = Field(nullable=False)
+    notified_at: datetime | None = Field(default=None)
+
+    __table_args__ = (
+        Index("ix_artifact_deletion_log_artifact_id", "artifact_id"),
+        Index("ix_artifact_deletion_log_run_id", "run_id"),
+        Index("ix_artifact_deletion_log_deleted_at", "deleted_at"),
+    )
+
+
+class KnowledgeDocument(SQLModel, table=True):
+    """Документ базы знаний (раздел 17 data-model.md)."""
+
+    __tablename__ = "knowledge_document"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    title: str = Field(nullable=False)
+    source: str = Field(nullable=False)
+    doc_version: str = Field(nullable=False)
+    checksum: str = Field(nullable=False, unique=True)
+    uri: str = Field(nullable=False)
+    indexed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    __table_args__ = (
+        Index("ix_knowledge_document_source", "source"),
+        Index("ix_knowledge_document_indexed_at", "indexed_at"),
+    )
+
+
+class KnowledgeChunk(SQLModel, table=True):
+    """Чанк документа базы знаний с эмбеддингом (раздел 18 data-model.md)."""
+
+    __tablename__ = "knowledge_chunk"
+
+    id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    document_id: uuid.UUID = Field(
+        foreign_key="knowledge_document.id",
+        nullable=False,
+        ondelete="CASCADE",
+    )
+    ordinal: int = Field(nullable=False)
+    content: str = Field(sa_type=Text, nullable=False)
+    embedding: list[float] = Field(sa_type=Vector(1536), nullable=False)
+    token_count: int = Field(nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_knowledge_chunk_document_ordinal",
+            "document_id",
+            "ordinal",
+            unique=True,
+        ),
+        Index(
+            "ix_knowledge_chunk_embedding",
+            "embedding",
+            postgresql_using="hnsw",
+            postgresql_with={"m": "16", "ef_construction": "64"},
+            postgresql_ops={"embedding": "vector_cosine_ops"},
         ),
     )

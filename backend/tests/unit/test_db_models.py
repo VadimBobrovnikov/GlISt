@@ -10,8 +10,9 @@ analysis_result, result_territory, change_zone.
 from __future__ import annotations
 
 import decimal
+import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -27,15 +28,16 @@ from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel
 
 from glist.db.models import (
-    AnalysisResult,
     AnalysisRun,
     AreaOfInterest,
-    ChangeZone,
+    Artifact,
+    ArtifactDeletionLog,
     ClarificationRequest,
     GeocodeCache,
+    KnowledgeChunk,
+    KnowledgeDocument,
     ObservationDataset,
     Query,
-    ResultTerritory,
     RunDataset,
     RunStage,
     SettingsProfile,
@@ -230,6 +232,36 @@ async def _make_query(session: AsyncSession, user: User) -> Query:
     session.add(query)
     await session.flush()
     return query
+
+
+async def _make_settings_profile(session: AsyncSession) -> SettingsProfile:
+    profile = SettingsProfile(
+        settings_hash="test_hash_" + uuid.uuid4().hex[:8],
+        name="test_profile",
+        values={"ndvi_threshold": 0.5, "min_area_m2": 1000},
+    )
+    session.add(profile)
+    await session.flush()
+    return profile
+
+
+async def _make_analysis_run(session: AsyncSession, user: User) -> AnalysisRun:
+    """Создаёт валидный AnalysisRun со всеми зависимостями."""
+    query = await _make_query(session, user)
+    profile = await _make_settings_profile(session)
+    run = AnalysisRun(
+        query_id=query.id,
+        status="ожидает",
+        trace_id="test-trace-" + uuid.uuid4().hex[:8],
+        settings_hash=profile.settings_hash,
+        params_hash="params_" + uuid.uuid4().hex[:8],
+        seed=42,
+        rag_index_version="v1",
+        model_versions={"llm": "gpt-4", "embedding": "text-embedding-3-small"},
+    )
+    session.add(run)
+    await session.flush()
+    return run
 
 
 async def test_clarification_request_create_valid(db_session: AsyncSession, schema: None) -> None:
@@ -1060,3 +1092,385 @@ def test_run_dataset_fk_observation_dataset() -> None:
     mapper = inspect(RunDataset)
     col = mapper.columns["dataset_id"]
     assert any("observation_dataset" in str(fk.target_fullname) for fk in col.foreign_keys)
+
+
+# ---------------------------------------------------------------------------
+# Artifact (раздел 15 data-model.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_artifact_create_valid_preview(db_session: AsyncSession, schema: None) -> None:
+    """Artifact без retention_until для preview/final kinds — OK."""
+    user = await _make_user(db_session)
+    run = await _make_analysis_run(db_session, user)
+    artifact = Artifact(
+        run_id=run.id,
+        kind="preview_png",
+        uri="s3://bucket/preview.png",
+        size_bytes=1024,
+        checksum="abc123",
+        is_heavy=False,
+    )
+    db_session.add(artifact)
+    await db_session.flush()
+    assert artifact.id is not None
+    assert artifact.retention_until is None
+
+
+async def test_artifact_create_valid_final_geotiff(db_session: AsyncSession, schema: None) -> None:
+    """Artifact без retention_until для final_geotiff — OK."""
+    user = await _make_user(db_session)
+    run = await _make_analysis_run(db_session, user)
+    artifact = Artifact(
+        run_id=run.id,
+        kind="final_geotiff",
+        uri="s3://bucket/final.tif",
+        size_bytes=200 * 1024 * 1024,
+        checksum="def456",
+        is_heavy=True,
+    )
+    db_session.add(artifact)
+    await db_session.flush()
+    assert artifact.id is not None
+    assert artifact.retention_until is None
+
+
+async def test_artifact_create_valid_raw_scene(db_session: AsyncSession, schema: None) -> None:
+    """Artifact с retention_until для raw_scene — OK."""
+    user = await _make_user(db_session)
+    run = await _make_analysis_run(db_session, user)
+    retention = datetime.now(UTC) + timedelta(days=30)
+    artifact = Artifact(
+        run_id=run.id,
+        kind="raw_scene",
+        uri="s3://bucket/scene.tif",
+        size_bytes=500 * 1024 * 1024,
+        checksum="ghi789",
+        is_heavy=True,
+        retention_until=retention,
+    )
+    db_session.add(artifact)
+    await db_session.flush()
+    assert artifact.id is not None
+    assert artifact.retention_until == retention
+
+
+async def test_artifact_create_valid_intermediate_ndvi(
+    db_session: AsyncSession, schema: None
+) -> None:
+    """Artifact с retention_until для intermediate_ndvi — OK."""
+    user = await _make_user(db_session)
+    run = await _make_analysis_run(db_session, user)
+    retention = datetime.now(UTC) + timedelta(days=7)
+    artifact = Artifact(
+        run_id=run.id,
+        kind="intermediate_ndvi",
+        uri="s3://bucket/ndvi.tif",
+        size_bytes=150 * 1024 * 1024,
+        checksum="jkl012",
+        is_heavy=True,
+        retention_until=retention,
+    )
+    db_session.add(artifact)
+    await db_session.flush()
+    assert artifact.id is not None
+    assert artifact.retention_until == retention
+
+
+async def test_artifact_create_valid_intermediate_classified(
+    db_session: AsyncSession, schema: None
+) -> None:
+    """Artifact с retention_until для intermediate_classified — OK."""
+    user = await _make_user(db_session)
+    run = await _make_analysis_run(db_session, user)
+    retention = datetime.now(UTC) + timedelta(days=7)
+    artifact = Artifact(
+        run_id=run.id,
+        kind="intermediate_classified",
+        uri="s3://bucket/classified.tif",
+        size_bytes=180 * 1024 * 1024,
+        checksum="mno345",
+        is_heavy=True,
+        retention_until=retention,
+    )
+    db_session.add(artifact)
+    await db_session.flush()
+    assert artifact.id is not None
+    assert artifact.retention_until == retention
+
+
+async def test_artifact_reject_retention_until_for_preview(
+    db_session: AsyncSession, schema: None
+) -> None:
+    """retention_until для preview_png должен вызывать IntegrityError."""
+    user = await _make_user(db_session)
+    run = await _make_analysis_run(db_session, user)
+    artifact = Artifact(
+        run_id=run.id,
+        kind="preview_png",
+        uri="s3://bucket/preview.png",
+        size_bytes=1024,
+        checksum="abc123",
+        is_heavy=False,
+        retention_until=datetime.now(UTC) + timedelta(days=30),
+    )
+    db_session.add(artifact)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+async def test_artifact_reject_missing_retention_for_raw_scene(
+    db_session: AsyncSession, schema: None
+) -> None:
+    """Отсутствие retention_until для raw_scene должно вызывать IntegrityError."""
+    user = await _make_user(db_session)
+    run = await _make_analysis_run(db_session, user)
+    artifact = Artifact(
+        run_id=run.id,
+        kind="raw_scene",
+        uri="s3://bucket/scene.tif",
+        size_bytes=500 * 1024 * 1024,
+        checksum="ghi789",
+        is_heavy=True,
+        retention_until=None,
+    )
+    db_session.add(artifact)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+async def test_artifact_reject_invalid_kind(db_session: AsyncSession, schema: None) -> None:
+    """Недопустимый kind должен вызывать IntegrityError."""
+    user = await _make_user(db_session)
+    run = await _make_analysis_run(db_session, user)
+    artifact = Artifact(
+        run_id=run.id,
+        kind="invalid_kind",
+        uri="s3://bucket/test.tif",
+        size_bytes=1024,
+        checksum="abc123",
+        is_heavy=False,
+    )
+    db_session.add(artifact)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+def test_artifact_kind_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, Artifact).__table__.constraints
+        if getattr(c, "name", None) == "artifact_kind_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    for kind in (
+        "preview_png",
+        "final_geotiff",
+        "geojson",
+        "pdf",
+        "raw_scene",
+        "intermediate_ndvi",
+        "intermediate_classified",
+    ):
+        assert kind in sql
+
+
+def test_artifact_retention_until_check_defined() -> None:
+    constraints = [
+        c
+        for c in cast(Any, Artifact).__table__.constraints
+        if getattr(c, "name", None) == "artifact_retention_until_check"
+    ]
+    assert len(constraints) == 1
+    sql = str(constraints[0].sqltext)
+    assert "retention_until IS NOT NULL" in sql
+    assert "raw_scene" in sql
+    assert "intermediate_ndvi" in sql
+    assert "intermediate_classified" in sql
+
+
+def test_artifact_fk_analysis_run() -> None:
+    mapper = inspect(Artifact)
+    col = mapper.columns["run_id"]
+    assert any("analysis_run" in str(fk.target_fullname) for fk in col.foreign_keys)
+
+
+# ---------------------------------------------------------------------------
+# ArtifactDeletionLog (раздел 16 data-model.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_artifact_deletion_log_create_valid(db_session: AsyncSession, schema: None) -> None:
+    user = await _make_user(db_session)
+    run = await _make_analysis_run(db_session, user)
+    artifact = Artifact(
+        run_id=run.id,
+        kind="preview_png",
+        uri="s3://bucket/preview.png",
+        size_bytes=1024,
+        checksum="abc123",
+        is_heavy=False,
+    )
+    db_session.add(artifact)
+    await db_session.flush()
+
+    log = ArtifactDeletionLog(
+        artifact_id=artifact.id,
+        run_id=run.id,
+        reason="expired",
+    )
+    db_session.add(log)
+    await db_session.flush()
+    assert log.id is not None
+    assert isinstance(log.deleted_at, datetime)
+    assert log.notified_at is None
+
+
+def test_artifact_deletion_log_fk_artifact() -> None:
+    mapper = inspect(ArtifactDeletionLog)
+    col = mapper.columns["artifact_id"]
+    assert any("artifact" in str(fk.target_fullname) for fk in col.foreign_keys)
+
+
+def test_artifact_deletion_log_fk_analysis_run() -> None:
+    mapper = inspect(ArtifactDeletionLog)
+    col = mapper.columns["run_id"]
+    assert any("analysis_run" in str(fk.target_fullname) for fk in col.foreign_keys)
+
+
+# ---------------------------------------------------------------------------
+# KnowledgeDocument (раздел 17 data-model.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_knowledge_document_create_valid(db_session: AsyncSession, schema: None) -> None:
+    doc = KnowledgeDocument(
+        title="Test Document",
+        source="test_source",
+        doc_version="1.0",
+        checksum="abc123checksum",
+        uri="s3://bucket/doc.pdf",
+    )
+    db_session.add(doc)
+    await db_session.flush()
+    assert doc.id is not None
+    assert isinstance(doc.indexed_at, datetime)
+
+
+async def test_knowledge_document_unique_checksum(db_session: AsyncSession, schema: None) -> None:
+    """Уникальность checksum должна соблюдаться."""
+    doc1 = KnowledgeDocument(
+        title="Doc 1",
+        source="test",
+        doc_version="1.0",
+        checksum="unique_checksum",
+        uri="s3://bucket/doc1.pdf",
+    )
+    doc2 = KnowledgeDocument(
+        title="Doc 2",
+        source="test",
+        doc_version="1.0",
+        checksum="unique_checksum",
+        uri="s3://bucket/doc2.pdf",
+    )
+    db_session.add(doc1)
+    await db_session.flush()
+    db_session.add(doc2)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+# ---------------------------------------------------------------------------
+# KnowledgeChunk (раздел 18 data-model.md)
+# ---------------------------------------------------------------------------
+
+
+async def test_knowledge_chunk_create_valid(db_session: AsyncSession, schema: None) -> None:
+    """Создание чанка с эмбеддингом (vector(1536))."""
+    doc = KnowledgeDocument(
+        title="Test Document",
+        source="test_source",
+        doc_version="1.0",
+        checksum="abc123checksum",
+        uri="s3://bucket/doc.pdf",
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    # Создаём тестовый эмбеддинг (1536 float значений)
+    embedding = [0.1] * 1536
+    chunk = KnowledgeChunk(
+        document_id=doc.id,
+        ordinal=0,
+        content="Test content " * 50,  # ~800 chars
+        embedding=embedding,
+        token_count=100,
+    )
+    db_session.add(chunk)
+    await db_session.flush()
+    assert chunk.id is not None
+    assert chunk.embedding == embedding
+    assert chunk.token_count == 100
+
+
+async def test_knowledge_chunk_unique_document_ordinal(
+    db_session: AsyncSession, schema: None
+) -> None:
+    """UNIQUE(document_id, ordinal) должен соблюдаться."""
+    doc = KnowledgeDocument(
+        title="Test Document",
+        source="test_source",
+        doc_version="1.0",
+        checksum="abc123checksum_unique",
+        uri="s3://bucket/doc.pdf",
+    )
+    db_session.add(doc)
+    await db_session.flush()
+
+    embedding = [0.1] * 1536
+    chunk1 = KnowledgeChunk(
+        document_id=doc.id,
+        ordinal=0,
+        content="First chunk",
+        embedding=embedding,
+        token_count=50,
+    )
+    chunk2 = KnowledgeChunk(
+        document_id=doc.id,
+        ordinal=0,  # Тот же ordinal
+        content="Second chunk",
+        embedding=embedding,
+        token_count=50,
+    )
+    db_session.add(chunk1)
+    await db_session.flush()
+    db_session.add(chunk2)
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
+
+
+def test_knowledge_chunk_unique_document_ordinal_index() -> None:
+    """Проверка наличия UNIQUE индекса на (document_id, ordinal)."""
+    mapper = inspect(KnowledgeChunk)
+    indexes = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_knowledge_chunk_document_ordinal" in indexes
+
+
+def test_knowledge_chunk_embedding_vector_type() -> None:
+    """Проверка что embedding имеет тип Vector(1536)."""
+    col = cast(Any, KnowledgeChunk).__table__.columns["embedding"]
+    assert col.type.dim == 1536
+
+
+def test_knowledge_chunk_fk_knowledge_document() -> None:
+    mapper = inspect(KnowledgeChunk)
+    col = mapper.columns["document_id"]
+    assert any("knowledge_document" in str(fk.target_fullname) for fk in col.foreign_keys)
+
+
+def test_knowledge_chunk_embedding_hnsw_index_defined() -> None:
+    """Проверка наличия HNSW индекса на embedding."""
+    mapper = inspect(KnowledgeChunk)
+    indexes = {ix.name for ix in mapper.mapped_table.indexes}
+    assert "ix_knowledge_chunk_embedding" in indexes
