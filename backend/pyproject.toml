@@ -59,6 +59,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
 
 [tool.ruff.format]
 quote-style = "double"
+exclude = ["alembic/versions/*", "alembic/env.py"]
 
 [tool.mypy]
 strict = true
