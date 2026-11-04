@@ -6,9 +6,8 @@ event/runId/occurredAt, уникальный seq, публикацию в Redis 
 """
 
 import json
-import pytest
 
-from typing import Any
+import pytest
 
 from glist.trace.events import EventPublisher, get_publisher
 
