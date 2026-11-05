@@ -61,7 +61,7 @@ async def test_retrieve_context_respects_threshold(db_session):
     db_session.add(doc)
     await db_session.flush()
 
-    low_sim_embedding = [0.1] * 1536
+    low_sim_embedding = [-0.5] * 1536
     chunk = KnowledgeChunk(
         document_id=doc.id,
         ordinal=0,

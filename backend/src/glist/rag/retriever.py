@@ -75,8 +75,8 @@ async def retrieve_context(
     rows = result.all()
 
     # Форматируем вывод
-    chunks = []
-    documents_set = set()
+    chunks: list[dict[str, Any]] = []
+    documents_list: list[dict[str, Any]] = []
     similarities = []
 
     for row in rows:
@@ -98,33 +98,24 @@ async def retrieve_context(
                 "document_source": doc_source,
             }
         )
-        documents_set.add(
-            {
-                "id": str(chunk.document_id) if hasattr(chunk, "document_id") else None,
-                "title": doc_title,
-                "source": doc_source,
-                "checksum": doc_checksum,
-            }
-        )
+        doc_id = str(chunk.document_id) if hasattr(chunk, "document_id") else None
+        doc_entry = {
+            "id": doc_id,
+            "title": doc_title,
+            "source": doc_source,
+            "checksum": doc_checksum,
+        }
+        if doc_id and doc_id not in [d.get("id") for d in documents_list]:
+            documents_list.append(doc_entry)
+
         similarities.append(float(similarity))
 
-    # Уникальные документы (отслеживаем по ID)
-    documents_by_id = {}
-    for d in documents_set:
-        doc_id = d.get("id")
-        if doc_id and doc_id not in documents_by_id:
-            documents_by_id[doc_id] = d
-    documents = list(documents_by_id.values())
 
-    # Сортировка по убыванию схожести
+# Сортировка по убыванию схожести
     chunks.sort(key=lambda c: c["similarity"], reverse=True)
-    documents.sort(
-        key=lambda d: d.get("similarity", 0) if isinstance(d, dict) else 0,
-        reverse=True,
-    )
 
     return {
-        "documents": documents[:top_k],
+        "documents": documents_list[:top_k],
         "chunks": chunks[:top_k],
         "similarities": similarities[:top_k],
     }
