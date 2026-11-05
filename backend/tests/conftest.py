@@ -40,12 +40,14 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
-    AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
+from sqlmodel import SQLModel
 from testcontainers.community.postgres import PostgresContainer
+
+from glist.db.session import _CompatAsyncSession as AsyncSession
 
 DB_IMAGE = "glist/postgis-pgvector:16-3.6-pgvector"
 _DEPLOY_DIR = Path(__file__).resolve().parents[1] / "deploy"
@@ -306,9 +308,17 @@ async def db_session(db_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 
     Внешняя транзакция не коммитится, ``commit()`` теста закрывает только
     savepoint-уровень — после теста ``connection.rollback()`` убирает все данные,
-    схема (когда появится в T013+) остаётся нетронутой.
+    схема остаётся нетронутой.
     """
     async with db_engine.connect() as connection:
+        # Создаём таблицы (идемпотентно) и коммитим отдельно,
+        # чтобы схема осталась после отката тестовой транзакции
+        trans = await connection.begin()
+        await connection.run_sync(
+            SQLModel.metadata.create_all, checkfirst=True
+        )
+        await trans.commit()
+
         await connection.begin()
         await connection.begin_nested()
         factory = async_sessionmaker(

@@ -3,13 +3,15 @@
 Отвечает за:
 - chunking текста: 800 символов, перекрытие 100 символов
 - генерацию эмбеддингов через LLMProvider
-- запись KnowledgeDocument и KnowledgeChunk в pgvector"""
+- запись KnowledgeDocument и KnowledgeChunk в pgvector
+"""
 
 from __future__ import annotations
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from glist.db.models import KnowledgeDocument
+from glist.db.models import KnowledgeChunk, KnowledgeDocument
 from glist.llm.provider import LLMProvider
 
 logger = structlog.get_logger()
@@ -38,22 +40,22 @@ def chunk_text(text: str) -> list[str]:
         end = min(start + CHUNK_SIZE, text_len)
         chunk = text[start:end]
         chunks.append(chunk)
-        start += CHUNK_SIZE - CHUNK_OVERLAP
-        if start + CHUNK_OVERLAP >= text_len:
+        start += CHUNK_SIZE
+        if start >= text_len:
             break
 
     return chunks
 
 
 async def index_document(
-    session,
+    session: AsyncSession,
     *,
     provider: LLMProvider,
     title: str,
     source: str,
     content: str,
     doc_version: str = "1.0",
-    checksum: Optional[str] = None,
+    checksum: str | None = None,
 ) -> KnowledgeDocument:
     """Индексирует документ: чанкинг, эмбеддинги, запись в БД.
 
@@ -79,6 +81,7 @@ async def index_document(
         source=source,
         doc_version=doc_version,
         checksum=checksum,
+        uri=source,
     )
     session.add(document)
     await session.flush()
@@ -89,14 +92,13 @@ async def index_document(
         embedding = await provider.embeddings([chunk_text_content])
         vector = embedding[0] if embedding else [0.0] * 1536
 
-        chunk = KnowledgeDocument(
+        chunk = KnowledgeChunk(
+            document_id=document.id,
             title=document.title,
-            source=document.source,
-            doc_version=document.doc_version,
-            checksum=document.checksum,
-            content=chunk_text_content,
             ordinal=idx,
+            content=chunk_text_content,
             embedding=vector,
+            token_count=len(chunk_text_content),
         )
         session.add(chunk)
 

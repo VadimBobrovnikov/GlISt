@@ -571,9 +571,9 @@ class KnowledgeDocument(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     title: str = Field(nullable=False)
     source: str = Field(nullable=False)
-    doc_version: str = Field(nullable=False)
+    doc_version: str = Field(default="1.0", nullable=False)
     checksum: str = Field(nullable=False, unique=True)
-    uri: str = Field(nullable=False)
+    uri: str = Field(default="", nullable=False)
     indexed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     __table_args__ = (
@@ -593,10 +593,11 @@ class KnowledgeChunk(SQLModel, table=True):
         nullable=False,
         ondelete="CASCADE",
     )
+    title: str = Field(default="", nullable=False)
     ordinal: int = Field(nullable=False)
     content: str = Field(sa_type=Text, nullable=False)
     embedding: list[float] = Field(sa_type=Vector(1536), nullable=False)
-    token_count: int = Field(nullable=False)
+    token_count: int = Field(default=0, nullable=False)
 
     __table_args__ = (
         Index(

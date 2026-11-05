@@ -24,6 +24,7 @@ import contextlib
 from collections.abc import AsyncIterator
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -42,6 +43,41 @@ _POOL_RECYCLE_SECONDS = 1800
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
+
+
+class _AsyncQueryBuilder:
+    """Обратная совместимость со стилем ``session.query(Model)`` из SQLAlchemy 1.x.
+
+    Позволяет писать ``await session.query(Model).filter(...).all()``
+    поверх ``AsyncSession`` (SQLAlchemy 2.0 не имеет метода ``query``).
+    """
+
+    def __init__(self, session: AsyncSession, entities: tuple[Any, ...]) -> None:
+        self._session = session
+        self._entities = entities
+        self._whereclauses: list[Any] = []
+
+    def filter(self, *criterion: Any) -> _AsyncQueryBuilder:
+        self._whereclauses.extend(criterion)
+        return self
+
+    async def all(self) -> list[Any]:
+        stmt = select(*self._entities)
+        if self._whereclauses:
+            stmt = stmt.where(*self._whereclauses)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def first(self) -> Any | None:
+        rows = await self.all()
+        return rows[0] if rows else None
+
+
+class _CompatAsyncSession(AsyncSession):
+    """AsyncSession с обратнопередающим методом ``query``."""
+
+    def query(self, *entities: Any) -> _AsyncQueryBuilder:
+        return _AsyncQueryBuilder(self, entities)
 
 
 def normalize_dsn(url: str) -> str:
@@ -121,7 +157,7 @@ def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     if _session_factory is None:
         _session_factory = async_sessionmaker(
             bind=get_engine(),
-            class_=AsyncSession,
+            class_=_CompatAsyncSession,
             expire_on_commit=False,
             autoflush=False,
         )

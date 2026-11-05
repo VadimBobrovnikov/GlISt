@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,7 +22,7 @@ async def retrieve_context(
     top_k: int = 5,
     similarity_threshold: float = 0.72,
     document_ids: list[int] | None = None,
-) -> dict:
+) -> dict[str, Any]:
     """Ищет наиболее релевантные чанки для given query embedding.
 
     Использует cosine similarity через pgvector.
@@ -38,22 +40,35 @@ async def retrieve_context(
         - "chunks": список KnowledgeChunk с метаданными
         - "similarities": список оценок похожести
     """
-    from pgvector.sqlalchemy import CosineDistance
+    from sqlalchemy import literal_column
+
+    query_embedding_str = "[" + ",".join(f"{v:.8f}" for v in query_embedding) + "]"
+
+    # Cosine distance через pgvector-оператор <=> (1 - cosine_distance = similarity)
+    similarity_expr: Any = literal_column(
+        f"1 - (embedding <=> '{query_embedding_str}'::vector)"
+    ).label("similarity")
 
     # Строим запрос к KnowledgeChunk с cosine distance
-    stmt = (
+    stmt: Any = (
         select(
             KnowledgeChunk,
-            KnowledgeDocument.title.label("doc_title"),
-            KnowledgeDocument.source.label("doc_source"),
-            KnowledgeDocument.checksum.label("doc_checksum"),
-            (1 - CosineDistance(KnowledgeChunk.embedding, query_embedding)).label(
-                "similarity"
-            ),
+            KnowledgeDocument.title.label("doc_title"),  # type: ignore[attr-defined]
+            KnowledgeDocument.source.label("doc_source"),  # type: ignore[attr-defined]
+            KnowledgeDocument.checksum.label("doc_checksum"),  # type: ignore[attr-defined]
+            similarity_expr,
         )
         .select_from(KnowledgeChunk)
-        .join(KnowledgeDocument, KnowledgeChunk.document_id == document_id if hasattr(KnowledgeChunk, "document_id") else True)
+        .join(
+            KnowledgeDocument,
+            KnowledgeChunk.document_id == KnowledgeDocument.id,  # type: ignore[arg-type]
+        )
     )
+
+    if document_ids:
+        stmt = stmt.where(
+            KnowledgeChunk.document_id.in_(document_ids)  # type: ignore[attr-defined]
+        )
 
     # Получаем результаты
     result = await session.execute(stmt)
@@ -93,12 +108,20 @@ async def retrieve_context(
         )
         similarities.append(float(similarity))
 
-    # Уникальные документы
-    documents = list(documents_set)
+    # Уникальные документы (отслеживаем по ID)
+    documents_by_id = {}
+    for d in documents_set:
+        doc_id = d.get("id")
+        if doc_id and doc_id not in documents_by_id:
+            documents_by_id[doc_id] = d
+    documents = list(documents_by_id.values())
 
     # Сортировка по убыванию схожести
     chunks.sort(key=lambda c: c["similarity"], reverse=True)
-    documents.sort(key=lambda d: d.get("similarity", 0) if isinstance(d, dict) else 0, reverse=True)
+    documents.sort(
+        key=lambda d: d.get("similarity", 0) if isinstance(d, dict) else 0,
+        reverse=True,
+    )
 
     return {
         "documents": documents[:top_k],

@@ -49,7 +49,9 @@ async def test_chunk_text_single_line():
 
 
 @pytest.mark.asyncio
-async def test_index_document_creates_knowledge_document_and_chunks(db_session, mock_provider, sample_text):
+async def test_index_document_creates_knowledge_document_and_chunks(
+    db_session, mock_provider, sample_text
+):
     """index_document сохраняет документ и чанки в БД."""
     with patch.object(mock_provider, 'embeddings', async_new_callable=AsyncMock) as mock_emb:
         mock_emb.return_value = [[0.1] * 1536]

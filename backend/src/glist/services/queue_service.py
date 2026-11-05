@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +29,7 @@ STATUS_ERROR = "ошибка"
 async def enqueue_run(
     session: AsyncSession,
     *,
-    run_id: str,
+    run_id: UUID,
     query_id: str,
 ) -> int:
     """Поставляет запуск в очередь.
@@ -46,7 +47,7 @@ async def enqueue_run(
     """
     # Получаем все запуски в очереди и вычисляем максимальную позицию
     result = await session.execute(
-        select(AnalysisRun).where(  # type: ignore[arg-type]
+        select(AnalysisRun).where(
             AnalysisRun.status == STATUS_WAITING  # type: ignore[arg-type]
         )
     )
@@ -58,7 +59,7 @@ async def enqueue_run(
 
     await session.execute(
         update(AnalysisRun)
-        .where(AnalysisRun.id == run_id)
+        .where(AnalysisRun.id == run_id)  # type: ignore[arg-type]
         .values(
             status=STATUS_WAITING,
             queue_position=queue_position,
@@ -74,7 +75,7 @@ async def enqueue_run(
 async def get_queue_position(
     session: AsyncSession,
     *,
-    run_id: str,
+    run_id: UUID,
 ) -> int | None:
     """Возвращает текущую позицию запуска в очереди.
 
@@ -86,7 +87,7 @@ async def get_queue_position(
         Позиция в очереди или None, если запуск не найден или не в очереди.
     """
     result = await session.execute(
-        select(AnalysisRun).where(AnalysisRun.id == run_id)
+        select(AnalysisRun).where(AnalysisRun.id == run_id)  # type: ignore[arg-type]
     )
     run = result.scalar_one_or_none()
     return run.queue_position if run else None
@@ -102,7 +103,7 @@ async def get_queue_length(session: AsyncSession) -> int:
         Количество запусков в очереди.
     """
     result = await session.execute(
-        select(AnalysisRun).where(  # type: ignore[arg-type]
+        select(AnalysisRun).where(
             AnalysisRun.status == STATUS_WAITING  # type: ignore[arg-type]
         )
     )
@@ -111,7 +112,7 @@ async def get_queue_length(session: AsyncSession) -> int:
 
 async def claim_next_run(
     session: AsyncSession,
-) -> str | None:
+) -> UUID | None:
     """Забирает следующий запуск из очереди для обработки.
 
     Устанавливает статус «в обработке», обнуляет queue_position,
@@ -128,14 +129,14 @@ async def claim_next_run(
     result = await session.execute(
         select(AnalysisRun)
         .where(AnalysisRun.status == STATUS_WAITING)  # type: ignore[arg-type]
-        .order_by(AnalysisRun.queued_at.asc().nullslast())  # type: ignore[union-attr, arg-type]
+        .order_by(AnalysisRun.queued_at.asc().nullslast())  # type: ignore[union-attr]
         .limit(1)
     )
     run = result.scalar_one_or_none()
     if run is None:
         return None
 
-    run_id = str(run.id)
+    run_id = run.id
     run.status = STATUS_PROCESSING
     run.queue_position = None
     run.started_at = datetime.now(UTC)
@@ -147,7 +148,7 @@ async def claim_next_run(
 async def complete_run(
     session: AsyncSession,
     *,
-    run_id: str,
+    run_id: UUID,
     status: str = STATUS_COMPLETED,
 ) -> None:
     """Завершает запуск и запускает следующий из очереди (автостарт).

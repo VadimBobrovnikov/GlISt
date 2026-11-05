@@ -104,7 +104,7 @@ class LangfuseTracer:
         """
         client = self._get_client()
         try:
-            return client.trace(
+            return client.trace(  # type: ignore[attr-defined]
                 id=trace_id,
                 name=name,
                 user_id=user_id,
@@ -140,7 +140,7 @@ class LangfuseTracer:
         """
         client = self._get_client()
         try:
-            return client.span(
+            return client.span(  # type: ignore[attr-defined]
                 trace_id=trace_id,
                 id=span_id,
                 name=name,
@@ -181,7 +181,7 @@ class LangfuseTracer:
         """
         client = self._get_client()
         try:
-            return client.generation(
+            return client.generation(  # type: ignore[attr-defined]
                 trace_id=trace_id,
                 id=generation_id,
                 name=name,

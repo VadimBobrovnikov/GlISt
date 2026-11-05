@@ -30,7 +30,7 @@ class EventPublisher:
     async def _get_redis(self) -> aioredis.Redis:
         if self._redis is None:
             settings = get_settings()
-            self._redis = aioredis.from_url(
+            self._redis = aioredis.from_url(  # type: ignore[no-untyped-call]
                 settings.redis_url.get_secret_value(),
                 encoding="utf-8",
                 decode_responses=True,
