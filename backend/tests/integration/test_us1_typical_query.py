@@ -11,7 +11,7 @@ class TestUs1TypicalQuery:
 
     def test_full_query_lifecycle(self, db_session):
         """End-to-end: query -> LLM -> graph -> save result in DB."""
-        from glist.llm.mock import MockLLMProvider
+        from glist.llm.mock_provider import MockLLMProvider
 
         provider = MockLLMProvider()
         # TODO: Implement full graph traversal and result saving

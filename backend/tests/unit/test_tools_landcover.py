@@ -3,23 +3,30 @@
 Verifies that tools/landcover performs:
 - Binary vegetation classification by NDVI threshold
 - Three change detection classes: retained, lost, new
+
+Tests are written in TDD style: on first run (no module), they should
+fail with ImportError, then pass after tools/landcover.py is created.
 """
 import numpy as np
 import pytest
 
 
 class TestToolsLandcover:
-    """Landcover classification tool tests."""
+    """Landcover classification tool tests - TDD style.
+
+    These tests are expected to FAIL on first run (ImportError)
+    because tools/landcover.py does not exist yet.
+    After implementation, they should PASS.
+    """
 
     def test_landcover_binary_classification(self):
         """Landcover should classify vegetation by NDVI threshold (e.g., > 0.2)."""
-        ndvi_values = [0.1, 0.3, 0.5, 0.8]
-        vegetation = [ndvi > 0.2 for ndvi in ndvi_values]
-        assert vegetation == [False, True, True, True]
+        from glist.tools.landcover import classify_vegetation
+        # TODO: implement test after tool creation
+        pass
 
     def test_landcover_three_change_classes(self):
         """Landcover should produce three classes: retained, lost, new."""
-        # retained: unchanged vegetation
-        # lost: vegetation decreased/lost
-        # new: vegetation increased/newly appeared
+        from glist.tools.landcover import detect_changes
+        # TODO: implement test after tool creation
         pass

@@ -4,26 +4,36 @@ Verifies that tools/raster_ops performs:
 - Cloud masking on raster data
 - NDVI calculation on synthetic numpy arrays
 - Median composite creation
+
+Tests are written in TDD style: on first run (no module), they should
+fail with ImportError, then pass after tools/raster_ops.py is created.
 """
 import numpy as np
 import pytest
 
 
 class TestToolsRasterOps:
-    """Raster operations tool tests."""
+    """Raster operations tool tests - TDD style.
+
+    These tests are expected to FAIL on first run (ImportError)
+    because tools/raster_ops.py does not exist yet.
+    After implementation, they should PASS.
+    """
 
     def test_raster_cloud_masking(self):
         """Raster ops should mask clouds based on QA/QC bands."""
+        from glist.tools.raster_ops import mask_clouds
+        # TODO: implement test after tool creation
         pass
 
     def test_raster_calculate_ndvi(self):
         """Raster ops should calculate NDVI from red and NIR bands."""
-        # Create synthetic red and NIR bands
-        red = np.array([[0.1, 0.2], [0.3, 0.4]], dtype=np.float32)
-        nir = np.array([[0.3, 0.5], [0.6, 0.7]], dtype=np.float32)
-        ndvi = (nir - red) / (nir + red)
-        assert np.isclose(ndvi[0, 0], 0.5, rtol=1e-5)
+        from glist.tools.raster_ops import calculate_ndvi
+        # TODO: implement test after tool creation
+        pass
 
     def test_raster_median_composite(self):
         """Raster ops should create a median composite from multiple timestamps."""
+        from glist.tools.raster_ops import median_composite
+        # TODO: implement test after tool creation
         pass
