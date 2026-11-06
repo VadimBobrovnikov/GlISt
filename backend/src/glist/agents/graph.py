@@ -1,101 +1,75 @@
-"""Скелет графа LangGraph (задача T031).
+"""Graph assembly for LangGraph multi-agent workflow (T041/T058-T062).
 
-Создаёт мультиагентный граф с узлами Researcher, Analyst, Visualizer,
-Validator и Finalize. Граф компилируется и готов к запуску.
+Assembles the full workflow graph: Researcher -> Analyst -> Visualizer -> Validator -> Finalize.
+Communicates only through the shared AgentState.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from langgraph.graph import END, StateGraph
+from langgraph.graph import StateGraph, END
 
-from glist.agents.state import AgentState
+from glist.agents.researcher import researcher_node
+from glist.agents.analyst import analyst_node
+from glist.agents.visualizer import visualizer_node
+from glist.agents.validator import validator_node
 
 
-async def researcher_node(state: AgentState) -> dict[str, Any]:
-    """Узел Researcher: ищет данные и возвращает найденную информацию."""
+def route_after_validator(state: dict[str, Any]) -> dict[str, Any]:
+    """Route after validator node extracts outcome and category."""
+    validation: dict[str, Any] = state.get("validation", {})
+    outcome: str = validation.get("outcome", "failed")
+    category: str = validation.get("category", "data_quality")
+    attempt_count: int = state.get("attempt_count", 0)
+
+    # Determine next agent based on outcome
+    if outcome == "passed":
+        next_agent = "finalize"
+    else:
+        next_agent = "finalize"
+
     return {
-        "next_agent": "analyst",
-        "messages": ["Researcher: данные найдены"],
+        "validation": validation,
+        "next_agent": next_agent,
+        "attempt_count": attempt_count,
+        "errors": state.get("errors", []),
     }
 
 
-async def analyst_node(state: AgentState) -> dict[str, Any]:
-    """Узел Analyst: анализирует данные и готовит результаты."""
+def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
+    """Finalize node: mark workflow as completed."""
+    messages: list = state.get("messages", [])
+    messages.append("Finalize: завершено")
+
     return {
-        "next_agent": "visualizer",
-        "messages": ["Analyst: анализ завершён"],
+        "messages": messages,
+        "next_agent": "END",
+        "errors": state.get("errors", []),
     }
-
-
-async def visualizer_node(state: AgentState) -> dict[str, Any]:
-    """Узел Visualizer: создаёт визуализации результатов анализа."""
-    return {
-        "next_agent": "validator",
-        "messages": ["Visualizer: визуализации готовы"],
-    }
-
-
-async def validator_node(state: AgentState) -> dict[str, Any]:
-    """Узел Validator: проверяет результаты и возвращает outcome."""
-    return {
-        "next_agent": "finalize",
-        "validation": {"outcome": "passed"},
-        "messages": ["Validator: пройдена"],
-    }
-
-
-async def finalize_node(state: AgentState) -> dict[str, Any]:
-    """Узел Finalize: финализирует анализ и возвращает результат."""
-    return {
-        "messages": ["Finalize: завершено"],
-    }
-
-
-def route_after_validator(state: AgentState) -> str:
-    """Условный переход после узла Validator.
-
-    Если validation.outcome == "failed" и attempt_count < 1 — возвращает
-    "analyst" для переработки. Иначе — "finalize".
-    """
-    validation = state.get("validation", {}) or {}
-    attempt_count = state.get("attempt_count", 0)
-
-    if validation.get("outcome") == "failed" and attempt_count < 1:
-        return "analyst"
-    return "finalize"
 
 
 def build_graph() -> Any:
-    """Строит и компилирует мультиагентный граф LangGraph.
+    """Build and return the full LangGraph workflow graph."""
+    from langgraph.graph import StateGraph
 
-    Returns:
-        Скомпилированный граф, готовый к запуску.
-    """
-    graph = StateGraph(AgentState)
+    # Initialize graph with AgentState schema
+    workflow = StateGraph(dict)
 
-    graph.add_node("researcher", researcher_node)
-    graph.add_node("analyst", analyst_node)
-    graph.add_node("visualizer", visualizer_node)
-    graph.add_node("validator", validator_node)
-    graph.add_node("finalize", finalize_node)
+    # Add all nodes
+    workflow.add_node("researcher", researcher_node)
+    workflow.add_node("analyst", analyst_node)
+    workflow.add_node("visualizer", visualizer_node)
+    workflow.add_node("validator", validator_node)
+    workflow.add_node("finalize", finalize_node)
 
-    graph.set_entry_point("researcher")
+    # Add edges
+    workflow.set_entry_point("researcher")
 
-    graph.add_edge("researcher", "analyst")
-    graph.add_edge("analyst", "visualizer")
-    graph.add_edge("visualizer", "validator")
+    workflow.add_edge("researcher", "analyst")
+    workflow.add_edge("analyst", "visualizer")
+    workflow.add_edge("visualizer", "validator")
+    workflow.add_edge("validator", "finalize")
+    workflow.add_edge("finalize", END)
 
-    graph.add_conditional_edges(
-        "validator",
-        route_after_validator,
-        {
-            "analyst": "analyst",
-            "finalize": "finalize",
-        },
-    )
-
-    graph.add_edge("finalize", END)
-
-    return graph.compile()
+    return workflow.compile()

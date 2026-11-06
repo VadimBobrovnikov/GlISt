@@ -14,7 +14,7 @@ SCHEMA_PATH = PROJECT_ROOT / "specs" / "001-geo-analysis-platform" / "contracts"
 
 
 def load_schema():
-    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+    with open(SCHEMA_PATH, encoding="utf-8") as f:
         return json.load(f)
 
 

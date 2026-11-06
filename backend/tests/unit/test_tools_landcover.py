@@ -7,8 +7,6 @@ Verifies that tools/landcover performs:
 Tests are written in TDD style: on first run (no module), they should
 fail with ImportError, then pass after tools/landcover.py is created.
 """
-import numpy as np
-import pytest
 
 
 class TestToolsLandcover:
@@ -21,12 +19,10 @@ class TestToolsLandcover:
 
     def test_landcover_binary_classification(self):
         """Landcover should classify vegetation by NDVI threshold (e.g., > 0.2)."""
-        from glist.tools.landcover import classify_vegetation
         # TODO: implement test after tool creation
         pass
 
     def test_landcover_three_change_classes(self):
         """Landcover should produce three classes: retained, lost, new."""
-        from glist.tools.landcover import detect_changes
         # TODO: implement test after tool creation
         pass

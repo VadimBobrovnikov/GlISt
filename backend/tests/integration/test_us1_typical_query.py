@@ -3,7 +3,6 @@
 Tests the full chain: request -> MockLLMProvider -> graph -> DB save.
 Uses db_session fixture for database operations.
 """
-import pytest
 
 
 class TestUs1TypicalQuery:

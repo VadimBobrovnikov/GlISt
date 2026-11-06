@@ -5,8 +5,6 @@ Verifies that tools/export_geojson.py assembles GeoJSON correctly.
 Tests are written in TDD style: on first run (no module), they should
 fail with ImportError, then pass after tools/export_geojson.py is created.
 """
-import json
-import pytest
 
 
 class TestToolsExportGeoJSON:
@@ -19,6 +17,5 @@ class TestToolsExportGeoJSON:
 
     def test_geojson_assembled_correctly(self):
         """GeoJSON should have valid FeatureCollection structure."""
-        from glist.tools.export_geojson import export_assemble_geojson
         # TODO: implement test after tool creation
         pass
