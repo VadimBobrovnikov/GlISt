@@ -14,6 +14,7 @@ from glist.agents.researcher import researcher_node
 from glist.agents.analyst import analyst_node
 from glist.agents.visualizer import visualizer_node
 from glist.agents.validator import validator_node
+from glist.agents.state import AgentState
 
 
 def route_after_validator(state: dict[str, Any]) -> str:
@@ -37,22 +38,13 @@ def route_after_validator(state: dict[str, Any]) -> str:
 
 def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
     """Finalize node: mark workflow as completed."""
-    messages: list = state.get("messages", [])
-    messages.append("Finalize: завершено")
-
-    return {
-        "messages": messages,
-        "next_agent": "END",
-        "errors": state.get("errors", []),
-    }
+    return {"messages": ["Finalize: завершено"]}
 
 
 def build_graph() -> Any:
     """Build and return the full LangGraph workflow graph."""
-    from langgraph.graph import StateGraph
-
     # Initialize graph with AgentState schema
-    workflow = StateGraph(dict)
+    workflow = StateGraph(AgentState)
 
     # Add all nodes
     workflow.add_node("researcher", researcher_node)
@@ -68,7 +60,7 @@ def build_graph() -> Any:
     workflow.add_edge("analyst", "visualizer")
     workflow.add_edge("visualizer", "validator")
     # Use conditional edge from validator using route_after_validator
-    workflow.add_conditional_edges("validator", route_after_validator)
+    workflow.add_conditional_edges("validator", route_after_validator, {"finalize": "finalize", "analyst": "analyst"})
     workflow.add_edge("finalize", END)
 
     return workflow.compile()
