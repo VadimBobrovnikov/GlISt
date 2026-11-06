@@ -16,25 +16,23 @@ from glist.agents.visualizer import visualizer_node
 from glist.agents.validator import validator_node
 
 
-def route_after_validator(state: dict[str, Any]) -> dict[str, Any]:
-    """Route after validator node extracts outcome and category."""
+def route_after_validator(state: dict[str, Any]) -> str:
+    """Route after validator node extracts outcome and category.
+
+    Returns only the string name of the next agent node.
+    """
     validation: dict[str, Any] = state.get("validation", {})
     outcome: str = validation.get("outcome", "failed")
     category: str = validation.get("category", "data_quality")
     attempt_count: int = state.get("attempt_count", 0)
 
-    # Determine next agent based on outcome
+    # Logic for routing
     if outcome == "passed":
-        next_agent = "finalize"
-    else:
-        next_agent = "finalize"
-
-    return {
-        "validation": validation,
-        "next_agent": next_agent,
-        "attempt_count": attempt_count,
-        "errors": state.get("errors", []),
-    }
+        return "finalize"
+    if outcome == "failed" and category == "analysis_error" and attempt_count < 1:
+        return "analyst"
+    # All other cases: proceed to finalize
+    return "finalize"
 
 
 def finalize_node(state: dict[str, Any]) -> dict[str, Any]:
@@ -69,7 +67,8 @@ def build_graph() -> Any:
     workflow.add_edge("researcher", "analyst")
     workflow.add_edge("analyst", "visualizer")
     workflow.add_edge("visualizer", "validator")
-    workflow.add_edge("validator", "finalize")
+    # Use conditional edge from validator using route_after_validator
+    workflow.add_conditional_edges("validator", route_after_validator)
     workflow.add_edge("finalize", END)
 
     return workflow.compile()
