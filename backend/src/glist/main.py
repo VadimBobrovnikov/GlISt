@@ -1,7 +1,7 @@
 """FastAPI приложение GlISt (задача T036).
 
-Инициализирует приложение, подключает роутеры (health, ws) и настраивает
-глобальный обработчик ошибок с форматом ``{"code": "...", "message": "..."}``.
+Инициализирует приложение, подключает роутеры (health, ws, queries, runs, exports)
+и настраивает глобальный обработчик ошибок с форматом ``{"code": "...", "message": "..."}``.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from glist.api import health, ws
+from glist.api import exports, health, queries, runs, ws
 
 app = FastAPI(
     title="GlISt — геопространственная мультиагентная платформа",
@@ -19,6 +19,9 @@ app = FastAPI(
 
 app.include_router(health.router)
 app.include_router(ws.router)
+app.include_router(queries.router)
+app.include_router(runs.router)
+app.include_router(exports.router)
 
 
 @app.exception_handler(Exception)
