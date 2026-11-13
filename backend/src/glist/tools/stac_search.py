@@ -4,17 +4,23 @@ Provides functions to search for satellite imagery via STAC API
 using pystac-client, with cloud cover filtering and metadata extraction.
 """
 import asyncio
+import json
 import logging
+import os
 from typing import Any
 
 import pystac
 import pystac_client
+import requests
 
 logger = logging.getLogger(__name__)
 
 # Element 84 Earth Search v1: публичный STAC API Sentinel-2 на AWS.
 EARTH_SEARCH_STAC_URL = "https://earth-search.aws.element84.com/v1"
 SENTINEL2_L2A_COLLECTION = "sentinel-2-l2a"
+_STAC_ATTEMPTS = 2
+_STAC_TIMEOUT_SECONDS = 45.0
+_STAC_BACKOFF_SECONDS = 2.0
 
 
 def search_sentinel2(
@@ -190,7 +196,11 @@ def preserve_provenance(item: pystac.Item) -> dict[str, Any]:
 
 def _asset_href(item: Any, *names: str) -> str | None:
     """Возвращает href первого найденного asset по именам (pystac Asset/dict)."""
-    assets = getattr(item, "assets", {}) or {}
+    assets = getattr(item, "assets", None)
+    if not isinstance(assets, dict) and isinstance(item, dict):
+        assets = item.get("assets", {})
+    if not isinstance(assets, dict):
+        return None
     for name in names:
         asset = assets.get(name)
         if asset is None:
@@ -211,6 +221,15 @@ def _iter_search_items(search: Any) -> list[Any]:
     return list(raw_items or [])
 
 
+def _rfc3339(value: str, *, end_of_day: bool = False) -> str:
+    """Приводит дату к RFC3339, который требует Earth Search."""
+    text = value.strip()
+    if "T" in text:
+        return text
+    suffix = "T23:59:59Z" if end_of_day else "T00:00:00Z"
+    return f"{text}{suffix}"
+
+
 def _search_sentinel2_scenes_sync(
     bbox: list[float],
     start_date: str,
@@ -219,42 +238,70 @@ def _search_sentinel2_scenes_sync(
     limit: int,
 ) -> list[dict[str, Any]]:
     """Синхронная часть поиска (pystac-client блокирующий)."""
-    try:
-        client = pystac_client.Client.open(EARTH_SEARCH_STAC_URL)
-        search = client.search(
-            collections=[SENTINEL2_L2A_COLLECTION],
-            bbox=bbox,
-            datetime=f"{start_date}/{end_date}",
-            query={"eo:cloud_cover": {"lt": max_cloud_cover}},
-            limit=limit,
-        )
-
-        scenes: list[dict[str, Any]] = []
-        for item in _iter_search_items(search):
-            red_url = _asset_href(item, "red", "B04", "b04")
-            nir_url = _asset_href(item, "nir", "B08", "b08")
-            scl_url = _asset_href(item, "scl", "SCL")
-            if not (red_url and nir_url and scl_url):
-                continue
-
-            properties = getattr(item, "properties", {}) or {}
-            scenes.append(
-                {
-                    "id": str(getattr(item, "id", "")),
-                    "datetime": properties.get("datetime"),
-                    "cloud_cover": properties.get(
-                        "eo:cloud_cover", properties.get("cloud_cover", 0)
-                    ),
-                    "platform": properties.get("platform", "Sentinel-2"),
-                    "red_url": red_url,
-                    "nir_url": nir_url,
-                    "scl_url": scl_url,
-                }
-            )
-        return scenes
-    except Exception as exc:  # noqa: BLE001 — сеть STAC не должна ронять граф
-        logger.warning("Sentinel-2 STAC search error: %s", exc)
+    params: dict[str, str | int] = {
+        "collections": SENTINEL2_L2A_COLLECTION,
+        "bbox": ",".join(str(value) for value in bbox),
+        "datetime": (
+            f"{_rfc3339(start_date)}"
+            f"/{_rfc3339(end_date, end_of_day=True)}"
+        ),
+        "limit": min(max(limit, 5), 20),
+        "query": json.dumps({"eo:cloud_cover": {"lt": max_cloud_cover}}),
+    }
+    headers = {
+        "User-Agent": os.environ.get("OSM_USER_AGENT", "GlISt/0.1"),
+        "Accept": "application/geo+json",
+    }
+    response = requests.get(
+        f"{EARTH_SEARCH_STAC_URL}/search",
+        params=params,
+        headers=headers,
+        timeout=(10, 60),
+    )
+    response.raise_for_status()
+    payload = response.json()
+    features = payload.get("features", []) if isinstance(payload, dict) else []
+    if not isinstance(features, list):
         return []
+
+    scenes: list[dict[str, Any]] = []
+    for item in features:
+        if not isinstance(item, dict):
+            continue
+        red_url = _asset_href(item, "red", "B04", "b04")
+        nir_url = _asset_href(item, "nir", "B08", "b08")
+        scl_url = _asset_href(item, "scl", "SCL")
+        if not (red_url and nir_url and scl_url):
+            continue
+
+        properties = item.get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
+        cloud_raw = properties.get(
+            "eo:cloud_cover", properties.get("cloud_cover", 100)
+        )
+        try:
+            cloud_cover = float(cloud_raw)
+        except (TypeError, ValueError):
+            cloud_cover = 100.0
+        if cloud_cover > max_cloud_cover:
+            continue
+
+        scenes.append(
+            {
+                "id": str(item.get("id", "")),
+                "datetime": properties.get("datetime"),
+                "cloud_cover": cloud_cover,
+                "platform": properties.get("platform", "Sentinel-2"),
+                "proj_epsg": properties.get("proj:epsg"),
+                "red_url": red_url,
+                "nir_url": nir_url,
+                "scl_url": scl_url,
+            }
+        )
+        if len(scenes) >= limit:
+            break
+    return scenes
 
 
 async def search_sentinel2_scenes(
@@ -267,7 +314,8 @@ async def search_sentinel2_scenes(
     """Ищет сцены Sentinel-2 L2A в Earth Search и возвращает COG-ссылки.
 
     Поиск выполняется в отдельном потоке (``asyncio.to_thread``), т.к.
-    ``pystac-client`` синхронный.
+    ``pystac-client`` синхронный. Сетевые ошибки повторяются с backoff и
+    ограничены таймаутом, чтобы граф не зависал.
 
     Args:
         bbox: [minx, miny, maxx, maxy] в EPSG:4326.
@@ -278,15 +326,33 @@ async def search_sentinel2_scenes(
 
     Returns:
         Список словарей со сценами:
-        ``id``, ``datetime``, ``cloud_cover``, ``platform``,
+        ``id``, ``datetime``, ``cloud_cover``, ``platform``, ``proj_epsg``,
         ``red_url`` (B04), ``nir_url`` (B08), ``scl_url`` (SCL).
         Сцены без любого из трёх COG-ассетов пропускаются.
     """
-    return await asyncio.to_thread(
-        _search_sentinel2_scenes_sync,
-        bbox,
-        start_date,
-        end_date,
-        max_cloud_cover,
-        limit,
-    )
+    last_error: Exception | None = None
+    for attempt in range(1, _STAC_ATTEMPTS + 1):
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(
+                    _search_sentinel2_scenes_sync,
+                    bbox,
+                    start_date,
+                    end_date,
+                    max_cloud_cover,
+                    limit,
+                ),
+                timeout=_STAC_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 — сеть STAC не должна ронять граф
+            last_error = exc
+            logger.warning(
+                "Sentinel-2 STAC search attempt %d/%d failed: %s",
+                attempt,
+                _STAC_ATTEMPTS,
+                exc,
+            )
+            if attempt < _STAC_ATTEMPTS:
+                await asyncio.sleep(_STAC_BACKOFF_SECONDS * attempt)
+    logger.warning("Sentinel-2 STAC search failed after retries: %s", last_error)
+    return []

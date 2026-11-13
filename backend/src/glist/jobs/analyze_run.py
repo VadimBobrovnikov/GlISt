@@ -13,7 +13,8 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from geoalchemy2 import Geography
+from sqlalchemy import cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from glist.agents.graph import build_graph
@@ -25,6 +26,7 @@ from glist.db.models import (
     ChangeZone,
     Query,
     ResultTerritory,
+    SettingsProfile,
 )
 from glist.db.session import get_session_ctx
 from glist.services.run_service import (
@@ -102,6 +104,7 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
         query_text = ""
         query_id = ""
         language = "ru"
+        analysis_context: dict[str, Any] = {}
 
         # Переводим запуск «в обработке» и читаем текст запроса для графа.
         async with get_session_ctx() as session:
@@ -116,6 +119,14 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
                 language = query.language
             else:
                 query_id = str(run.query_id)
+            profile = await session.get(SettingsProfile, run.settings_hash)
+            if profile is not None and isinstance(profile.values, dict):
+                threshold = profile.values.get("ndvi_threshold")
+                if threshold is not None:
+                    analysis_context["ndvi_threshold"] = threshold
+                min_area = profile.values.get("min_area_m2")
+                if min_area is not None:
+                    analysis_context["min_area_m2"] = min_area
             run.status = STATUS_PROCESSING
             run.started_at = datetime.now(UTC)
             await session.commit()
@@ -128,7 +139,7 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
             "mode": "single",
             "next_agent": "researcher",
             "attempt_count": 0,
-            "context": {},
+            "context": analysis_context,
             "datasets": {},
             "analysis_result": None,
             "visualization": None,
@@ -354,12 +365,20 @@ def _zone_geometry(zone: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _zone_geom_expr(zone: dict[str, Any]) -> Any:
-    """SQL-выражение PostGIS: MultiPolygon SRID 4326 из GeoJSON зоны."""
+    """SQL-выражение PostGIS: валидный MultiPolygon SRID 4326 из GeoJSON зоны."""
     geometry = _zone_geometry(zone)
     if geometry is None:
         raise ValueError("У зоны отсутствует GeoJSON-геометрия")
     return func.ST_Multi(
-        func.ST_SetSRID(func.ST_GeomFromGeoJSON(json.dumps(geometry)), 4326)
+        func.ST_CollectionExtract(
+            func.ST_MakeValid(
+                func.ST_SetSRID(
+                    func.ST_GeomFromGeoJSON(json.dumps(geometry)),
+                    4326,
+                )
+            ),
+            3,
+        )
     )
 
 
@@ -403,6 +422,8 @@ async def _save_territories(
         name = str(zone.get("territory_name") or "Москва")
         grouped.setdefault(name, []).append(zone)
 
+    total_area = Decimal("0")
+    zones_count = 0
     for position, (name, group) in enumerate(list(grouped.items())[:5], start=1):
         valid = [
             (zone, _zone_geom_expr(zone))
@@ -412,24 +433,13 @@ async def _save_territories(
         if not valid:
             continue
 
-        area_by_class: dict[str, float] = {
-            "retained": 0.0,
-            "lost": 0.0,
-            "new": 0.0,
-        }
-        for zone, _geom in valid:
-            change_class = str(zone.get("change_class") or "")
-            if change_class in area_by_class:
-                area_by_class[change_class] += float(zone.get("area_km2") or 0)
-
-        total_area = Decimal(str(round(sum(area_by_class.values()), 4)))
         aoi = AreaOfInterest(
             name=name,
             name_source="generated",
             aoi_type="admin",
             boundary=valid[0][1],
             validity_fixed=True,
-            area_km2=total_area,
+            area_km2=Decimal("0"),
         )
         session.add(aoi)
         await session.flush()
@@ -439,9 +449,9 @@ async def _save_territories(
             aoi_id=aoi.id,
             position=position,
             territory_name=name,
-            retained_area_km2=Decimal(str(round(area_by_class["retained"], 4))),
-            lost_area_km2=Decimal(str(round(area_by_class["lost"], 4))),
-            new_area_km2=Decimal(str(round(area_by_class["new"], 4))),
+            retained_area_km2=Decimal("0"),
+            lost_area_km2=Decimal("0"),
+            new_area_km2=Decimal("0"),
             source_run_id=run.id,
         )
         session.add(territory)
@@ -451,17 +461,56 @@ async def _save_territories(
             change_class = str(zone.get("change_class") or "")
             if change_class not in ("retained", "lost", "new"):
                 continue
-            area_km2 = Decimal(str(round(float(zone.get("area_km2") or 0), 4)))
+            area_m2_expr = func.ST_Area(cast(geom_expr, Geography))
             session.add(
                 ChangeZone(
                     result_territory_id=territory.id,
                     change_class=change_class,
                     geom=geom_expr,
-                    area_m2=area_km2 * Decimal("1000000"),
-                    area_km2=area_km2,
+                    area_m2=area_m2_expr,  # type: ignore[arg-type]
+                    area_km2=area_m2_expr / 1000000.0,  # type: ignore[arg-type]
                     period_start=period_start,
                     period_end=period_end,
-                    cleaned=False,
+                    cleaned=True,
                 )
             )
+            zones_count += 1
+        await session.flush()
+
+        stats_rows = (
+            await session.execute(
+                select(  # type: ignore[call-overload]
+                    ChangeZone.change_class,
+                    func.coalesce(func.sum(ChangeZone.area_km2), 0),
+                )
+                .where(
+                    ChangeZone.result_territory_id == territory.id
+                )
+                .group_by(ChangeZone.change_class)
+            )
+        ).all()
+        area_by_class: dict[str, Decimal] = {
+            "retained": Decimal("0"),
+            "lost": Decimal("0"),
+            "new": Decimal("0"),
+        }
+        for change_class, area_value in stats_rows:
+            key = str(change_class)
+            if key in area_by_class:
+                area_by_class[key] = Decimal(str(area_value))
+
+        territory.retained_area_km2 = area_by_class["retained"]
+        territory.lost_area_km2 = area_by_class["lost"]
+        territory.new_area_km2 = area_by_class["new"]
+        territory_total = sum(area_by_class.values(), Decimal("0"))
+        aoi.area_km2 = territory_total
+        total_area += territory_total
+        await session.flush()
+
+    result_row.territories_count = max(1, min(5, len(grouped)))
+    result_row.total_area_km2 = {
+        "total_km2": float(total_area),
+        "note": "сумма по территориям (с возможным пересечением)",
+        "zones": zones_count,
+    }
     await session.flush()

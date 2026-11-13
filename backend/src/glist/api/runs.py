@@ -186,6 +186,9 @@ async def get_run_result(  # noqa: B008
         )
     ).scalars().all()
     territory_by_id = {territory.id: territory for territory in territory_rows}
+    territory_name = (
+        territory_rows[0].territory_name if territory_rows else "Территория"
+    )
 
     zone_rows: list[Any] = []
     if territory_by_id:
@@ -193,15 +196,21 @@ async def get_run_result(  # noqa: B008
             (
                 await session.execute(
                     select(  # type: ignore[call-overload]
-                        ChangeZone.result_territory_id,
                         ChangeZone.change_class,
-                        ChangeZone.area_km2,
-                        func.ST_AsGeoJSON(ChangeZone.geom).label("geojson"),
-                    ).where(
+                        func.ST_AsGeoJSON(
+                            func.ST_Multi(func.ST_Union(ChangeZone.geom))
+                        ).label("geojson"),
+                        func.coalesce(func.sum(ChangeZone.area_km2), 0).label(
+                            "area_km2"
+                        ),
+                        func.count().label("zones_count"),
+                    )
+                    .where(
                         ChangeZone.result_territory_id.in_(  # type: ignore[attr-defined]
                             list(territory_by_id.keys())
                         )
                     )
+                    .group_by(ChangeZone.change_class)
                 )
             ).all()
         )
@@ -213,9 +222,8 @@ async def get_run_result(  # noqa: B008
     }
     territories: list[dict[str, Any]] = []
     for row in zone_rows:
-        territory = territory_by_id.get(row.result_territory_id)
         geojson_text = row.geojson
-        if territory is None or not isinstance(geojson_text, str):
+        if not isinstance(geojson_text, str):
             continue
         try:
             geometry = json.loads(geojson_text)
@@ -224,9 +232,10 @@ async def get_run_result(  # noqa: B008
 
         change_class = str(row.change_class)
         area_km2 = float(row.area_km2 or 0)
+        zones_count = int(row.zones_count or 0)
         if change_class in aggregate_stats:
             aggregate_stats[change_class]["areaKm2"] += area_km2
-            aggregate_stats[change_class]["zonesCount"] += 1
+            aggregate_stats[change_class]["zonesCount"] += zones_count
         if len(territories) >= 5:
             continue
 
@@ -236,11 +245,14 @@ async def get_run_result(  # noqa: B008
             "new": {"areaKm2": 0.0, "zonesCount": 0},
         }
         if change_class in stats:
-            stats[change_class] = {"areaKm2": area_km2, "zonesCount": 1}
+            stats[change_class] = {
+                "areaKm2": area_km2,
+                "zonesCount": zones_count,
+            }
         territories.append(
             {
                 "position": len(territories) + 1,
-                "territoryName": territory.territory_name,
+                "territoryName": territory_name,
                 "aoiType": "admin",
                 "boundary": geometry,
                 "stats": stats,

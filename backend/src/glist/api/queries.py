@@ -92,6 +92,8 @@ async def _ensure_settings_profile(
                 "llm_model": settings.llm_model,
                 "embedding_model": settings.embedding_model,
                 "seed": settings.seed,
+                "ndvi_threshold": 0.25,
+                "min_area_m2": 1000,
             },
         )
     )

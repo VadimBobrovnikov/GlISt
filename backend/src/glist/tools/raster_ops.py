@@ -6,10 +6,14 @@ Provides functions for working with raster data using rasterio and numpy:
 - Median composite creation
 """
 
+import warnings
 from typing import Any, cast
 
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
+from rasterio.transform import Affine
+from rasterio.warp import transform_bounds
 from rasterio.windows import from_bounds
 
 
@@ -83,6 +87,33 @@ def mask_clouds_ndvi_threshold(
     return extreme
 
 
+# SCL-классы Sentinel-2 L2A, которые считаем непригодными:
+# 0 no-data, 1 saturated, 3 cloud shadow, 8/9 cloud, 10 cirrus, 11 snow/ice.
+_SCL_INVALID_CLASSES = frozenset({0, 1, 3, 8, 9, 10, 11})
+
+
+def mask_scl(
+    scl: np.ndarray,
+    invalid_classes: set[int] | frozenset[int] | None = None,
+) -> np.ndarray:
+    """Возвращает маску непригодных пикселей по SCL Sentinel-2.
+
+    Args:
+        scl: Массив классов SCL (uint8/uint16).
+        invalid_classes: Классы, считающиеся непригодными; по умолчанию
+            ``{0, 1, 3, 8, 9, 10, 11}`` (дыры, тени, облака, снег).
+
+    Returns:
+        Boolean-массив True = пиксель нужно исключить из композита.
+    """
+    classes = (
+        invalid_classes
+        if invalid_classes is not None
+        else _SCL_INVALID_CLASSES
+    )
+    return np.isin(scl.astype(np.int32), list(classes))
+
+
 def median_composite(
     arrays: list[np.ndarray], axis: int = 0
 ) -> np.ndarray:
@@ -104,8 +135,11 @@ def median_composite(
         if arr.shape != shape:
             raise ValueError(f"Array {i} has shape {arr.shape}, expected {shape}")
 
-    # Compute median along the specified axis
-    composite = np.median(np.stack(arrays, axis=axis), axis=axis)
+    # Compute median along the specified axis (NaN-aware: masked pixels ignored)
+    stacked = np.stack(arrays, axis=axis)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        composite = np.nanmedian(stacked, axis=axis)
     return cast(np.ndarray, composite).astype(np.float32)
 
 
@@ -133,6 +167,8 @@ def read_cog_window(
     bbox: tuple[float, float, float, float],
     band_number: int = 1,
     scale: float = 1.0,
+    out_shape: tuple[int, int] | None = None,
+    resampling: Resampling = Resampling.nearest,
 ) -> tuple[np.ndarray, Any]:
     """Читает только окно COG-файла, покрывающее bbox (EPSG:4326).
 
@@ -144,15 +180,33 @@ def read_cog_window(
         bbox: (minx, miny, maxx, maxy) в EPSG:4326.
         band_number: Номер band в файле (по умолчанию 1).
         scale: Множитель значений (например, 0.0001 для reflectance S2).
+        out_shape: Привести окно к размеру ``(rows, cols)`` (например, SCL 20 м
+            к сетке RED/NIR 10 м).
+        resampling: Метод ресемплинга при ``out_shape``.
 
     Returns:
         Кортеж ``(data, transform)``: массив окна и Affine-трансформ окна.
     """
     left, bottom, right, top = bbox
     with (
-        rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"),
+        rasterio.Env(
+            GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR",
+            GDAL_HTTP_CONNECTTIMEOUT="10",
+            GDAL_HTTP_TIMEOUT="30",
+            GDAL_HTTP_MAX_RETRY="1",
+        ),
         rasterio.open(cog_url) as src,
     ):
+        if src.crs is not None and src.crs.to_epsg() != 4326:
+            left, bottom, right, top = transform_bounds(
+                "EPSG:4326",
+                src.crs,
+                left,
+                bottom,
+                right,
+                top,
+                densify_pts=21,
+            )
         window = from_bounds(
             left,
             bottom,
@@ -160,6 +214,25 @@ def read_cog_window(
             top,
             transform=src.transform,
         )
-        data = src.read(band_number, window=window) * scale
-        transform = src.window_transform(window)
+        base_transform = src.window_transform(window)
+        if out_shape is None:
+            data = src.read(band_number, window=window) * scale
+            transform = base_transform
+        else:
+            out_rows, out_cols = int(out_shape[0]), int(out_shape[1])
+            if out_rows <= 0 or out_cols <= 0:
+                raise ValueError("out_shape должен содержать положительные размеры")
+            data = (
+                src.read(
+                    band_number,
+                    window=window,
+                    out_shape=(out_rows, out_cols),
+                    resampling=resampling,
+                )
+                * scale
+            )
+            transform = base_transform @ Affine.scale(
+                window.width / out_cols,
+                window.height / out_rows,
+            )
     return data, transform

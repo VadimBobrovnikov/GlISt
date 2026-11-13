@@ -79,6 +79,7 @@ module = [
     "reportlab.*",
     "arq.*",
     "pystac_client.*",
+    "requests.*",
     "langfuse.*",
     "langgraph.*",
     "matplotlib.*",

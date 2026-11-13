@@ -12,6 +12,7 @@ from glist.tools.raster_ops import read_cog_window
 
 def _mock_dataset(read_result: np.ndarray) -> MagicMock:
     dataset = MagicMock()
+    dataset.crs = None
     dataset.transform = "RASTER_TRANSFORM"
     dataset.read.return_value = read_result
     dataset.window_transform.return_value = "WINDOW_TRANSFORM"
