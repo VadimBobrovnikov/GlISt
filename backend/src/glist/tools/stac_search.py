@@ -3,10 +3,18 @@
 Provides functions to search for satellite imagery via STAC API
 using pystac-client, with cloud cover filtering and metadata extraction.
 """
+import asyncio
+import logging
 from typing import Any
 
 import pystac
 import pystac_client
+
+logger = logging.getLogger(__name__)
+
+# Element 84 Earth Search v1: публичный STAC API Sentinel-2 на AWS.
+EARTH_SEARCH_STAC_URL = "https://earth-search.aws.element84.com/v1"
+SENTINEL2_L2A_COLLECTION = "sentinel-2-l2a"
 
 
 def search_sentinel2(
@@ -178,3 +186,107 @@ def preserve_provenance(item: pystac.Item) -> dict[str, Any]:
         "instrument": properties.get("instrument", "Unknown"),
         "grid_id": properties.get("grid_id", None),
     }
+
+
+def _asset_href(item: Any, *names: str) -> str | None:
+    """Возвращает href первого найденного asset по именам (pystac Asset/dict)."""
+    assets = getattr(item, "assets", {}) or {}
+    for name in names:
+        asset = assets.get(name)
+        if asset is None:
+            continue
+        href = getattr(asset, "href", None)
+        if href is None and isinstance(asset, dict):
+            href = asset.get("href")
+        if isinstance(href, str) and href:
+            return href
+    return None
+
+
+def _iter_search_items(search: Any) -> list[Any]:
+    """Возвращает элементы поиска (совместимо с ItemSearch.items()/списком)."""
+    raw_items = getattr(search, "items", [])
+    if callable(raw_items):
+        return list(raw_items())
+    return list(raw_items or [])
+
+
+def _search_sentinel2_scenes_sync(
+    bbox: list[float],
+    start_date: str,
+    end_date: str,
+    max_cloud_cover: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Синхронная часть поиска (pystac-client блокирующий)."""
+    try:
+        client = pystac_client.Client.open(EARTH_SEARCH_STAC_URL)
+        search = client.search(
+            collections=[SENTINEL2_L2A_COLLECTION],
+            bbox=bbox,
+            datetime=f"{start_date}/{end_date}",
+            query={"eo:cloud_cover": {"lt": max_cloud_cover}},
+            limit=limit,
+        )
+
+        scenes: list[dict[str, Any]] = []
+        for item in _iter_search_items(search):
+            red_url = _asset_href(item, "red", "B04", "b04")
+            nir_url = _asset_href(item, "nir", "B08", "b08")
+            scl_url = _asset_href(item, "scl", "SCL")
+            if not (red_url and nir_url and scl_url):
+                continue
+
+            properties = getattr(item, "properties", {}) or {}
+            scenes.append(
+                {
+                    "id": str(getattr(item, "id", "")),
+                    "datetime": properties.get("datetime"),
+                    "cloud_cover": properties.get(
+                        "eo:cloud_cover", properties.get("cloud_cover", 0)
+                    ),
+                    "platform": properties.get("platform", "Sentinel-2"),
+                    "red_url": red_url,
+                    "nir_url": nir_url,
+                    "scl_url": scl_url,
+                }
+            )
+        return scenes
+    except Exception as exc:  # noqa: BLE001 — сеть STAC не должна ронять граф
+        logger.warning("Sentinel-2 STAC search error: %s", exc)
+        return []
+
+
+async def search_sentinel2_scenes(
+    bbox: list[float],
+    start_date: str,
+    end_date: str,
+    max_cloud_cover: int = 20,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Ищет сцены Sentinel-2 L2A в Earth Search и возвращает COG-ссылки.
+
+    Поиск выполняется в отдельном потоке (``asyncio.to_thread``), т.к.
+    ``pystac-client`` синхронный.
+
+    Args:
+        bbox: [minx, miny, maxx, maxy] в EPSG:4326.
+        start_date: Начало периода, ``YYYY-MM-DD``.
+        end_date: Конец периода, ``YYYY-MM-DD``.
+        max_cloud_cover: Максимальная облачность, %.
+        limit: Максимум сцен.
+
+    Returns:
+        Список словарей со сценами:
+        ``id``, ``datetime``, ``cloud_cover``, ``platform``,
+        ``red_url`` (B04), ``nir_url`` (B08), ``scl_url`` (SCL).
+        Сцены без любого из трёх COG-ассетов пропускаются.
+    """
+    return await asyncio.to_thread(
+        _search_sentinel2_scenes_sync,
+        bbox,
+        start_date,
+        end_date,
+        max_cloud_cover,
+        limit,
+    )

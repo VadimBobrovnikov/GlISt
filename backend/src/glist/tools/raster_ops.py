@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import numpy as np
 import rasterio
+from rasterio.windows import from_bounds
 
 
 def calculate_ndvi(red_band: np.ndarray, nir_band: np.ndarray) -> np.ndarray:
@@ -125,3 +126,40 @@ def read_band(
         band = src.read(band_number) * scale
         transform = src.transform
     return band, transform
+
+
+def read_cog_window(
+    cog_url: str,
+    bbox: tuple[float, float, float, float],
+    band_number: int = 1,
+    scale: float = 1.0,
+) -> tuple[np.ndarray, Any]:
+    """Читает только окно COG-файла, покрывающее bbox (EPSG:4326).
+
+    Окно вычисляется в системе координат растра; читается один band,
+    без загрузки всего файла (важно для облачных COG Sentinel-2).
+
+    Args:
+        cog_url: URL или путь к Cloud-Optimized GeoTIFF.
+        bbox: (minx, miny, maxx, maxy) в EPSG:4326.
+        band_number: Номер band в файле (по умолчанию 1).
+        scale: Множитель значений (например, 0.0001 для reflectance S2).
+
+    Returns:
+        Кортеж ``(data, transform)``: массив окна и Affine-трансформ окна.
+    """
+    left, bottom, right, top = bbox
+    with (
+        rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"),
+        rasterio.open(cog_url) as src,
+    ):
+        window = from_bounds(
+            left,
+            bottom,
+            right,
+            top,
+            transform=src.transform,
+        )
+        data = src.read(band_number, window=window) * scale
+        transform = src.window_transform(window)
+    return data, transform
