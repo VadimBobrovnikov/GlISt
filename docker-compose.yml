@@ -64,6 +64,21 @@ services:
       timeout: 3s
       retries: 10
 
+  migrate:
+    build:
+      context: ./backend
+    image: glist-api:0.1.0
+    restart: "no"
+    # Одноразовая задача: приводит схему БД к head до старта api/worker.
+    command: ["alembic", "upgrade", "head"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-glist}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-glist}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build:
       context: ./backend
@@ -87,6 +102,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   worker:
     build:
@@ -110,6 +127,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   # ------------------------------------------------------------------ LangFuse v4 (обязателен: Принцип III)
   langfuse:

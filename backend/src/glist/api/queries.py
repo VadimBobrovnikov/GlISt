@@ -22,8 +22,8 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from glist.api.deps import get_current_user, get_session
-from glist.config import get_settings
-from glist.db.models import AnalysisRun, Query
+from glist.config import Settings, get_settings
+from glist.db.models import AnalysisRun, Query, SettingsProfile, User
 from glist.services.queue_service import enqueue_run
 from glist.services.run_service import STATUS_WAITING
 
@@ -60,6 +60,44 @@ class QueryCreated(BaseModel):
     clarification: dict[str, Any] | None = None
 
 
+async def _ensure_user(
+    session: AsyncSession,
+    user_id: uuid.UUID,
+    current_user: dict[str, Any],
+) -> None:
+    """Создаёт локального пользователя, если его ещё нет (FK query.user_id)."""
+    existing = await session.get(User, user_id)
+    if existing is not None:
+        return
+    display_name = str(current_user.get("display_name") or "Локальный пользователь")
+    session.add(User(id=user_id, display_name=display_name))
+    await session.flush()
+
+
+async def _ensure_settings_profile(
+    session: AsyncSession,
+    settings_hash: str,
+    settings: Settings,
+) -> None:
+    """Создаёт профиль настроек, если его ещё нет (FK analysis_run.settings_hash)."""
+    existing = await session.get(SettingsProfile, settings_hash)
+    if existing is not None:
+        return
+    session.add(
+        SettingsProfile(
+            settings_hash=settings_hash,
+            name="default",
+            values={
+                "llm_provider": settings.llm_provider,
+                "llm_model": settings.llm_model,
+                "embedding_model": settings.embedding_model,
+                "seed": settings.seed,
+            },
+        )
+    )
+    await session.flush()
+
+
 
 @router.post(
     "/queries",
@@ -75,6 +113,13 @@ async def create_query(  # noqa: B008
     """Создаёт запрос, AnalysisRun и ставит задачу в ARQ-очередь."""
     user_id = uuid.UUID(current_user["id"])
     query_text = body.text.strip()
+    settings = get_settings()
+    settings_hash = "default_settings_hash"
+
+    # Заглушка аутентификации и профиль настроек должны существовать до вставки
+    # query/analysis_run: на них ссылаются FK.
+    await _ensure_user(session, user_id, current_user)
+    await _ensure_settings_profile(session, settings_hash, settings)
 
     query = Query(
         user_id=user_id,
@@ -87,12 +132,10 @@ async def create_query(  # noqa: B008
     session.add(query)
     await session.flush()
 
-    settings = get_settings()
     run_id = uuid.uuid4()
     trace_id = uuid.uuid4().hex
     params_hash_input = f"{query_text}:{body.parentQueryId or ''}:{body.mode or ''}"
     params_hash = hashlib.sha256(params_hash_input.encode()).hexdigest()
-    settings_hash = "default_settings_hash"
 
     run = AnalysisRun(
         id=run_id,
@@ -114,6 +157,9 @@ async def create_query(  # noqa: B008
     await session.flush()
 
     await enqueue_run(session, run_id=run.id, query_id=str(query.id))
+    # get_session не коммитит автоматически: фиксируем запрос и запуск до
+    # постановки задачи в ARQ, иначе воркер и GET /runs запись не увидят.
+    await session.commit()
 
     redis_url = settings.redis_url.get_secret_value()
     pool = await create_pool(RedisSettings.from_dsn(redis_url))

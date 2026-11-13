@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from glist.api import exports, health, queries, runs, ws
@@ -15,6 +16,15 @@ app = FastAPI(
     title="GlISt — геопространственная мультиагентная платформа",
     version="0.1.0",
     description="API для запуска и мониторинга геопространственного анализа",
+)
+
+# Flutter Web запускается на другом origin (localhost:<port>) — браузеру нужен CORS.
+# Аутентификация отложена (заглушка get_current_user), cookie/credentials не нужны.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(health.router)

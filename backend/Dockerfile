@@ -27,6 +27,10 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src ./src
 
+# Alembic нужен сервису migrate (docker-compose.yml): конфиг и скрипты миграций.
+COPY alembic.ini ./
+COPY alembic ./alembic
+
 # uv настроен с `package = false`, проект не устанавливается в venv.
 # Пакет glist лежит в /app/src — добавляем его в PYTHONPATH, иначе
 # uvicorn/arq не найдут модули glist.*.
