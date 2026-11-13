@@ -19,8 +19,6 @@ async def validator_node(state: dict[str, Any]) -> dict[str, Any]:
     Returns:
         Partial state update with validation outcome and next_agent.
     """
-    from glist.agents.state import AgentState
-
     context: dict[str, Any] = state.get("context", {})
     change_zones: list = context.get("change_zones", [])
     attempt_no: int = state.get("attempt_count", 0)

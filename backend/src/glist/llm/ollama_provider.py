@@ -33,12 +33,12 @@ class OllamaProvider(LLMProvider):
     def __init__(
         self,
         model: str | None = None,
-        base_url: str = "http://localhost:11434",
+        base_url: str | None = None,
         timeout: float = _DEFAULT_TIMEOUT,
     ) -> None:
         settings = get_settings()
         self._model = model or settings.llm_model
-        self._base_url = base_url.rstrip("/")
+        self._base_url = (base_url or settings.ollama_base_url).rstrip("/")
         self._timeout = timeout
 
     async def generate(self, prompt: str, **kwargs: Any) -> str:

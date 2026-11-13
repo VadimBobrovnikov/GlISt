@@ -8,13 +8,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
 
-from glist.agents.researcher import researcher_node
 from glist.agents.analyst import analyst_node
-from glist.agents.visualizer import visualizer_node
-from glist.agents.validator import validator_node
+from glist.agents.researcher import researcher_node
 from glist.agents.state import AgentState
+from glist.agents.validator import validator_node
+from glist.agents.visualizer import visualizer_node
 
 
 def route_after_validator(state: dict[str, Any]) -> str:
@@ -60,7 +60,11 @@ def build_graph() -> Any:
     workflow.add_edge("analyst", "visualizer")
     workflow.add_edge("visualizer", "validator")
     # Use conditional edge from validator using route_after_validator
-    workflow.add_conditional_edges("validator", route_after_validator, {"finalize": "finalize", "analyst": "analyst"})
+    workflow.add_conditional_edges(
+        "validator",
+        route_after_validator,
+        {"finalize": "finalize", "analyst": "analyst"},
+    )
     workflow.add_edge("finalize", END)
 
     return workflow.compile()
