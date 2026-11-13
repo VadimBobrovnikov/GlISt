@@ -6,17 +6,26 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from glist.agents.graph import build_graph
 from glist.agents.state import AgentState
-from glist.db.models import AnalysisResult, AnalysisRun, Query
+from glist.db.models import (
+    AnalysisResult,
+    AnalysisRun,
+    AreaOfInterest,
+    ChangeZone,
+    Query,
+    ResultTerritory,
+)
 from glist.db.session import get_session_ctx
 from glist.services.run_service import (
     STATUS_COMPLETED,
@@ -211,8 +220,8 @@ async def _save_result(
     session: AsyncSession,
     run: AnalysisRun,
     graph_result: dict[str, Any],
-) -> None:
-    """Сохраняет AnalysisResult из состояния графа (идемпотентно по run_id)."""
+) -> AnalysisResult | None:
+    """Сохраняет AnalysisResult и геозоны из состояния графа."""
     context = _as_dict(graph_result.get("context"))
     analysis = _as_dict(graph_result.get("analysis_result"))
     visualization = _as_dict(graph_result.get("visualization"))
@@ -272,6 +281,7 @@ async def _save_result(
         )
     ).scalar_one_or_none()
     if existing is not None:
+        await _clear_territories(session, existing.id)
         existing.mode = mode
         existing.territories_count = territories_count
         existing.has_overlap = has_overlap
@@ -282,7 +292,8 @@ async def _save_result(
         existing.sources_summary = sources_summary
         existing.validation_outcome = validation_outcome
         await session.flush()
-        return
+        await _save_territories(session, existing, run, graph_result)
+        return existing
 
     duplicate = (
         await session.execute(
@@ -295,21 +306,162 @@ async def _save_result(
         # Идемпотентный повтор: результат для таких параметров уже существует.
         run.reused_result_id = duplicate.id
         await session.flush()
+        return duplicate
+
+    result_row = AnalysisResult(
+        run_id=run.id,
+        params_hash=run.params_hash,
+        mode=mode,
+        territories_count=territories_count,
+        has_overlap=has_overlap,
+        total_area_km2=total_area_km2,
+        summary_text=summary_text,
+        explanation_text=explanation_text,
+        citations=citations,
+        sources_summary=sources_summary,
+        validation_outcome=validation_outcome,
+    )
+    session.add(result_row)
+    await session.flush()
+    await _save_territories(session, result_row, run, graph_result)
+    return result_row
+
+
+async def _clear_territories(
+    session: AsyncSession,
+    result_id: uuid.UUID,
+) -> None:
+    """Удаляет прежние территории/зоны результата (для повторного сохранения)."""
+    territory_rows = (
+        await session.execute(
+            select(ResultTerritory).where(
+                ResultTerritory.result_id == result_id  # type: ignore[arg-type]
+            )
+        )
+    ).scalars().all()
+    for territory in territory_rows:
+        # ChangeZone удаляются каскадом на уровне БД (ON DELETE CASCADE).
+        await session.delete(territory)
+    await session.flush()
+
+
+def _zone_geometry(zone: dict[str, Any]) -> dict[str, Any] | None:
+    """Возвращает GeoJSON-геометрию зоны, если она задана."""
+    geometry = zone.get("geometry")
+    if isinstance(geometry, dict) and geometry.get("coordinates"):
+        return geometry
+    return None
+
+
+def _zone_geom_expr(zone: dict[str, Any]) -> Any:
+    """SQL-выражение PostGIS: MultiPolygon SRID 4326 из GeoJSON зоны."""
+    geometry = _zone_geometry(zone)
+    if geometry is None:
+        raise ValueError("У зоны отсутствует GeoJSON-геометрия")
+    return func.ST_Multi(
+        func.ST_SetSRID(func.ST_GeomFromGeoJSON(json.dumps(geometry)), 4326)
+    )
+
+
+def _period_dates(graph_result: dict[str, Any]) -> tuple[date, date]:
+    """Даты периода анализа из состояния графа (fallback — сегодня)."""
+    context = _as_dict(graph_result.get("context"))
+    period = _as_dict(context.get("period"))
+
+    def _parse(value: object) -> date | None:
+        if isinstance(value, str):
+            try:
+                return date.fromisoformat(value[:10])
+            except ValueError:
+                return None
+        return None
+
+    today = date.today()
+    start = _parse(period.get("start")) or today
+    end = _parse(period.get("end")) or today
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
+async def _save_territories(
+    session: AsyncSession,
+    result_row: AnalysisResult,
+    run: AnalysisRun,
+    graph_result: dict[str, Any],
+) -> None:
+    """Сохраняет территории и зоны изменений (геометрия — через PostGIS)."""
+    context = _as_dict(graph_result.get("context"))
+    raw_zones = _as_list(context.get("change_zones"))
+    zones = [zone for zone in raw_zones if isinstance(zone, dict)]
+    if not zones:
         return
 
-    session.add(
-        AnalysisResult(
-            run_id=run.id,
-            params_hash=run.params_hash,
-            mode=mode,
-            territories_count=territories_count,
-            has_overlap=has_overlap,
-            total_area_km2=total_area_km2,
-            summary_text=summary_text,
-            explanation_text=explanation_text,
-            citations=citations,
-            sources_summary=sources_summary,
-            validation_outcome=validation_outcome,
+    period_start, period_end = _period_dates(graph_result)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for zone in zones:
+        name = str(zone.get("territory_name") or "Москва")
+        grouped.setdefault(name, []).append(zone)
+
+    for position, (name, group) in enumerate(list(grouped.items())[:5], start=1):
+        valid = [
+            (zone, _zone_geom_expr(zone))
+            for zone in group
+            if _zone_geometry(zone) is not None
+        ]
+        if not valid:
+            continue
+
+        area_by_class: dict[str, float] = {
+            "retained": 0.0,
+            "lost": 0.0,
+            "new": 0.0,
+        }
+        for zone, _geom in valid:
+            change_class = str(zone.get("change_class") or "")
+            if change_class in area_by_class:
+                area_by_class[change_class] += float(zone.get("area_km2") or 0)
+
+        total_area = Decimal(str(round(sum(area_by_class.values()), 4)))
+        aoi = AreaOfInterest(
+            name=name,
+            name_source="generated",
+            aoi_type="admin",
+            boundary=valid[0][1],
+            validity_fixed=True,
+            area_km2=total_area,
         )
-    )
+        session.add(aoi)
+        await session.flush()
+
+        territory = ResultTerritory(
+            result_id=result_row.id,
+            aoi_id=aoi.id,
+            position=position,
+            territory_name=name,
+            retained_area_km2=Decimal(str(round(area_by_class["retained"], 4))),
+            lost_area_km2=Decimal(str(round(area_by_class["lost"], 4))),
+            new_area_km2=Decimal(str(round(area_by_class["new"], 4))),
+            source_run_id=run.id,
+        )
+        session.add(territory)
+        await session.flush()
+
+        for zone, geom_expr in valid:
+            change_class = str(zone.get("change_class") or "")
+            if change_class not in ("retained", "lost", "new"):
+                continue
+            area_km2 = Decimal(str(round(float(zone.get("area_km2") or 0), 4)))
+            session.add(
+                ChangeZone(
+                    result_territory_id=territory.id,
+                    change_class=change_class,
+                    geom=geom_expr,
+                    area_m2=area_km2 * Decimal("1000000"),
+                    area_km2=area_km2,
+                    period_start=period_start,
+                    period_end=period_end,
+                    cleaned=False,
+                )
+            )
     await session.flush()

@@ -7,16 +7,17 @@ Endpoints:
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from glist.api.deps import get_current_user, get_session
-from glist.db.models import AnalysisResult, AnalysisRun
+from glist.db.models import AnalysisResult, AnalysisRun, ChangeZone, ResultTerritory
 
 router = APIRouter(prefix="/api/v1")
 
@@ -55,13 +56,34 @@ class Run(BaseModel):
 
 
 class AnalysisResultSchema(BaseModel):
-    """Схема AnalysisResult (упрощённая)."""
+    """Схема AnalysisResult с территориями и GeoJSON-геометрией."""
 
     id: uuid.UUID
     runId: uuid.UUID
-    territories: list[dict[str, Any]]
-    aggregate: dict[str, Any]
-    createdAt: Any
+    mode: str = "single"
+    territoriesCount: int = 0
+    hasOverlap: bool = False
+    crs: str = "EPSG:4326"
+    summaryText: str = ""
+    explanationText: str = ""
+    sources: list[dict[str, Any]] = []
+    citations: list[dict[str, Any]] = []
+    validationOutcome: str = "passed"
+    territories: list[dict[str, Any]] = []
+    aggregate: dict[str, Any] = {}
+    createdAt: Any = None
+
+
+def _source_dict(item: dict[str, Any]) -> dict[str, Any]:
+    """Приводит источник из sources_summary к виду контракта API."""
+    return {
+        "source": str(item.get("source") or ""),
+        "collection": str(item.get("collection") or ""),
+        "sceneId": str(item.get("sceneId") or item.get("scene_id") or ""),
+        "acquiredAt": item.get("acquiredAt"),
+        "cloudCover": item.get("cloudCover", item.get("cloud_cover")),
+        "resolutionM": item.get("resolutionM", item.get("resolution_m")),
+    }
 
 
 # --- Endpoints ---
@@ -154,10 +176,135 @@ async def get_run_result(  # noqa: B008
             detail="Результат ещё не готов",
         )
 
+    territory_rows = (
+        await session.execute(
+            select(ResultTerritory)
+            .where(
+                ResultTerritory.result_id == analysis_result.id  # type: ignore[arg-type]
+            )
+            .order_by(ResultTerritory.position)  # type: ignore[arg-type]
+        )
+    ).scalars().all()
+    territory_by_id = {territory.id: territory for territory in territory_rows}
+
+    zone_rows: list[Any] = []
+    if territory_by_id:
+        zone_rows = list(
+            (
+                await session.execute(
+                    select(  # type: ignore[call-overload]
+                        ChangeZone.result_territory_id,
+                        ChangeZone.change_class,
+                        ChangeZone.area_km2,
+                        func.ST_AsGeoJSON(ChangeZone.geom).label("geojson"),
+                    ).where(
+                        ChangeZone.result_territory_id.in_(  # type: ignore[attr-defined]
+                            list(territory_by_id.keys())
+                        )
+                    )
+                )
+            ).all()
+        )
+
+    aggregate_stats: dict[str, dict[str, Any]] = {
+        "retained": {"areaKm2": 0.0, "zonesCount": 0},
+        "lost": {"areaKm2": 0.0, "zonesCount": 0},
+        "new": {"areaKm2": 0.0, "zonesCount": 0},
+    }
+    territories: list[dict[str, Any]] = []
+    for row in zone_rows:
+        territory = territory_by_id.get(row.result_territory_id)
+        geojson_text = row.geojson
+        if territory is None or not isinstance(geojson_text, str):
+            continue
+        try:
+            geometry = json.loads(geojson_text)
+        except json.JSONDecodeError:
+            continue
+
+        change_class = str(row.change_class)
+        area_km2 = float(row.area_km2 or 0)
+        if change_class in aggregate_stats:
+            aggregate_stats[change_class]["areaKm2"] += area_km2
+            aggregate_stats[change_class]["zonesCount"] += 1
+        if len(territories) >= 5:
+            continue
+
+        stats: dict[str, dict[str, Any]] = {
+            "retained": {"areaKm2": 0.0, "zonesCount": 0},
+            "lost": {"areaKm2": 0.0, "zonesCount": 0},
+            "new": {"areaKm2": 0.0, "zonesCount": 0},
+        }
+        if change_class in stats:
+            stats[change_class] = {"areaKm2": area_km2, "zonesCount": 1}
+        territories.append(
+            {
+                "position": len(territories) + 1,
+                "territoryName": territory.territory_name,
+                "aoiType": "admin",
+                "boundary": geometry,
+                "stats": stats,
+                "sourceRunId": str(runId),
+            }
+        )
+
+    sources_summary = (
+        analysis_result.sources_summary
+        if isinstance(analysis_result.sources_summary, dict)
+        else {}
+    )
+    raw_sources = sources_summary.get("items")
+    if not isinstance(raw_sources, list):
+        datasets = sources_summary.get("datasets")
+        raw_sources = datasets.get("accepted") if isinstance(datasets, dict) else []
+    sources = (
+        [_source_dict(item) for item in raw_sources if isinstance(item, dict)]
+        if isinstance(raw_sources, list)
+        else []
+    )
+
+    citations_json = (
+        analysis_result.citations
+        if isinstance(analysis_result.citations, dict)
+        else {}
+    )
+    raw_citations = citations_json.get("items")
+    citations = (
+        [item for item in raw_citations if isinstance(item, dict)]
+        if isinstance(raw_citations, list)
+        else []
+    )
+
+    total_area = (
+        analysis_result.total_area_km2
+        if isinstance(analysis_result.total_area_km2, dict)
+        else {}
+    )
+    aggregate = {
+        "retained": aggregate_stats["retained"],
+        "lost": aggregate_stats["lost"],
+        "new": aggregate_stats["new"],
+        "note": str(
+            total_area.get("note")
+            or "сумма по территориям (с возможным пересечением)"
+        ),
+    }
+
     return AnalysisResultSchema(
         id=analysis_result.id,
         runId=runId,
-        territories=[],
-        aggregate={},
+        mode=analysis_result.mode,
+        territoriesCount=(
+            len(territories) if territories else analysis_result.territories_count
+        ),
+        hasOverlap=analysis_result.has_overlap,
+        crs=analysis_result.crs,
+        summaryText=analysis_result.summary_text,
+        explanationText=analysis_result.explanation_text,
+        sources=sources,
+        citations=citations,
+        validationOutcome=analysis_result.validation_outcome,
+        territories=territories,
+        aggregate=aggregate,
         createdAt=analysis_result.created_at,
     )
