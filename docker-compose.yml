@@ -29,7 +29,9 @@ services:
       TZ: UTC
       PGTZ: UTC
     ports:
-      - "127.0.0.1:5432:5432"
+      # 5432 на Windows часто занят локальным PostgreSQL — порт хоста настраивается.
+      # Для инструментов с хоста (alembic) используйте POSTGRES_HOST_PORT из .env.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5434}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -46,9 +48,12 @@ services:
     environment:
       REDIS_AUTH: ${REDIS_AUTH:?REDIS_AUTH задайте в .env}
     # --maxmemory-policy noeviction требуется LangFuse.
-    command: >
-      redis-server --requirepass $$REDIS_AUTH
-      --maxmemory-policy noeviction
+    # shell-форма нужна, чтобы пароль из окружения подставился внутри контейнера:
+    # compose экранирует $$ -> $, а значение переменной читает уже /bin/sh.
+    command:
+      - sh
+      - -c
+      - exec redis-server --requirepass "$$REDIS_AUTH" --maxmemory-policy noeviction
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -114,9 +119,14 @@ services:
       - "3000:3000"
     environment: &langfuse_env
       NEXTAUTH_URL: ${LANGFUSE_PUBLIC_URL:-http://localhost:3000}
+      # NextAuth в LangFuse v4 требует секрет; без него web падает на валидации env.
+      NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET:?LANGFUSE_NEXTAUTH_SECRET - openssl rand -hex 32}"
       DATABASE_URL: postgresql://${LANGFUSE_DB_USER:-langfuse}:${LANGFUSE_DB_PASSWORD:?LANGFUSE_DB_PASSWORD задайте в .env}@langfuse-postgres:5432/langfuse
       SALT: "${LANGFUSE_SALT:?LANGFUSE_SALT - openssl rand -hex 32}"
       ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY:?LANGFUSE_ENCRYPTION_KEY - openssl rand -hex 32}"
+      # LangFuse v4 читает REDIS_CONNECTION_STRING; REDIS_CONNECTION_URL оставлен
+      # для обратной совместимости со старыми версиями.
+      REDIS_CONNECTION_STRING: redis://:${REDIS_AUTH:?}@redis:6379/1
       REDIS_CONNECTION_URL: redis://:${REDIS_AUTH:?}@redis:6379/1
       CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
       CLICKHOUSE_URL: http://clickhouse:8123
@@ -234,7 +244,9 @@ services:
     volumes:
       - minio_data:/bitnami/minio/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      # В образе не настроен mc-alias `local`, а бинарь curl присутствует —
+      # проверяем встроенный HTTP health-endpoint MinIO.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 10

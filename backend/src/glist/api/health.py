@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import text
 
 from glist.api.deps import get_current_user, get_session
 from glist.trace.events import get_publisher
@@ -41,7 +42,7 @@ async def health(  # noqa: B008
 async def _check_db(session: Any) -> bool:
     """Проверяет, что соединение с БД живо."""
     try:
-        await session.execute("SELECT 1")
+        await session.execute(text("SELECT 1"))
         return True
     except Exception:  # noqa: BLE001 — любая ошибка БД = degraded
         return False
