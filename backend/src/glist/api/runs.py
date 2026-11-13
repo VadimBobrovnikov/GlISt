@@ -141,6 +141,13 @@ async def get_run_result(  # noqa: B008
         select(AnalysisResult).where(AnalysisResult.run_id == runId)  # type: ignore[arg-type]
     )
     analysis_result = result_row.scalar_one_or_none()
+    if analysis_result is None and run.reused_result_id is not None:
+        reused_row = await session.execute(
+            select(AnalysisResult).where(
+                AnalysisResult.id == run.reused_result_id  # type: ignore[arg-type]
+            )
+        )
+        analysis_result = reused_row.scalar_one_or_none()
     if analysis_result is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -149,7 +156,7 @@ async def get_run_result(  # noqa: B008
 
     return AnalysisResultSchema(
         id=analysis_result.id,
-        runId=analysis_result.run_id,
+        runId=runId,
         territories=[],
         aggregate={},
         createdAt=analysis_result.created_at,
