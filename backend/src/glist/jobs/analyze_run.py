@@ -247,20 +247,36 @@ async def _save_result(
     territories = _as_list(context.get("territories"))
     passed = str(validation.get("outcome") or "failed") == "passed"
 
-    summary_text = _first_text(
-        analysis.get("summary_text"),
-        visualization.get("summary_text"),
-        context.get("summary_text"),
-        context.get("analysis_error"),
-        f"Анализ завершён: зон изменений — {len(change_zones)}.",
-    )
-    explanation_text = _first_text(
-        analysis.get("explanation_text"),
-        visualization.get("explanation_text"),
-        context.get("text_explanation"),
-        context.get("analysis_error"),
-        summary_text,
-    )
+    failure = _as_dict(context.get("analysis_failure"))
+    if passed:
+        summary_text = _first_text(
+            analysis.get("summary_text"),
+            visualization.get("summary_text"),
+            context.get("summary_text"),
+            context.get("analysis_error"),
+            f"Анализ завершён: зон изменений — {len(change_zones)}.",
+        )
+        explanation_text = _first_text(
+            analysis.get("explanation_text"),
+            visualization.get("explanation_text"),
+            context.get("text_explanation"),
+            context.get("analysis_error"),
+            summary_text,
+        )
+    else:
+        # Неудачный запуск не должен выдавать себя за успешный результат.
+        reason = _first_text(
+            failure.get("message"),
+            context.get("analysis_error"),
+            "причина не сохранена",
+        )
+        prefix = (
+            "Технический сбой"
+            if str(failure.get("category") or "") == "analysis_error"
+            else "Результат не прошёл проверку"
+        )
+        summary_text = f"{prefix}: {reason}"
+        explanation_text = summary_text
 
     raw_citations = analysis.get("citations", visualization.get("citations"))
     citations = _as_dict(raw_citations)
@@ -325,15 +341,21 @@ async def _save_result(
             )
         )
     ).scalar_one_or_none()
-    if duplicate is not None:
-        # Идемпотентный повтор: результат для таких параметров уже существует.
+    if duplicate is not None and duplicate.validation_outcome == "passed":
+        # Идемпотентный повтор: переиспользуем только успешный результат.
         run.reused_result_id = duplicate.id
         await session.flush()
         return duplicate
 
+    # Повтор после неудачи не должен прятать новый расчёт за старым пустым
+    # результатом. params_hash уникален, поэтому даём результату свой ключ.
+    result_params_hash = run.params_hash
+    if duplicate is not None:
+        result_params_hash = f"{run.params_hash}#{run.id}"
+
     result_row = AnalysisResult(
         run_id=run.id,
-        params_hash=run.params_hash,
+        params_hash=result_params_hash,
         mode=mode,
         territories_count=territories_count,
         has_overlap=has_overlap,

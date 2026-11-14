@@ -17,7 +17,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from glist.api.deps import get_current_user, get_session
-from glist.db.models import AnalysisResult, AnalysisRun, ChangeZone, ResultTerritory
+from glist.db.models import (
+    AnalysisResult,
+    AnalysisRun,
+    AreaOfInterest,
+    ChangeZone,
+    ResultTerritory,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -139,6 +145,66 @@ async def get_run(  # noqa: B008
     )
 
 
+@router.get("/runs/{runId}/zones", tags=["runs"])
+async def get_run_zones(  # noqa: B008
+    runId: uuid.UUID,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+    current_user: dict[str, Any] = Depends(get_current_user),  # noqa: B008
+) -> dict[str, Any]:
+    """GeoJSON зон изменений (упрощённая геометрия) для карты."""
+    run = await session.get(AnalysisRun, runId)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    result_row = (
+        await session.execute(
+            select(AnalysisResult).where(AnalysisResult.run_id == runId)  # type: ignore[arg-type]
+        )
+    ).scalar_one_or_none()
+    if result_row is None and run.reused_result_id is not None:
+        result_row = await session.get(AnalysisResult, run.reused_result_id)
+    if result_row is None:
+        raise HTTPException(status_code=409, detail="Результат ещё не готов")
+
+    rows = (
+        await session.execute(
+            select(  # type: ignore[call-overload]
+                ResultTerritory.territory_name,
+                ChangeZone.change_class,
+                ChangeZone.area_km2,
+                func.ST_AsGeoJSON(
+                    func.ST_SimplifyPreserveTopology(ChangeZone.geom, 0.00005)
+                ).label("geojson"),
+            )
+            .join(
+                ResultTerritory,
+                ResultTerritory.id == ChangeZone.result_territory_id,
+            )
+            .where(ResultTerritory.result_id == result_row.id)
+        )
+    ).all()
+
+    features: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row.geojson, str):
+            continue
+        try:
+            geometry = json.loads(row.geojson)
+        except json.JSONDecodeError:
+            continue
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": geometry,
+                "properties": {
+                    "territory_name": str(row.territory_name),
+                    "change_class": str(row.change_class),
+                    "area_km2": round(float(row.area_km2 or 0), 6),
+                },
+            }
+        )
+    return {"type": "FeatureCollection", "features": features}
+
+
 @router.get(
     "/runs/{runId}/result",
     response_model=AnalysisResultSchema,
@@ -190,20 +256,19 @@ async def get_run_result(  # noqa: B008
         )
     ).scalars().all()
     territory_by_id = {territory.id: territory for territory in territory_rows}
-    territory_name = (
-        territory_rows[0].territory_name if territory_rows else "Территория"
-    )
 
-    zone_rows: list[Any] = []
+    stats_rows: list[Any] = []
+    boundary_by_territory: dict[uuid.UUID, Any] = {}
     if territory_by_id:
-        zone_rows = list(
+        territory_ids = list(territory_by_id.keys())
+        stats_rows = list(
             (
                 await session.execute(
                     select(  # type: ignore[call-overload]
+                        ChangeZone.result_territory_id.label(  # type: ignore[attr-defined]
+                            "territory_id"
+                        ),
                         ChangeZone.change_class,
-                        func.ST_AsGeoJSON(
-                            func.ST_Multi(func.ST_Union(ChangeZone.geom))
-                        ).label("geojson"),
                         func.coalesce(func.sum(ChangeZone.area_km2), 0).label(
                             "area_km2"
                         ),
@@ -211,55 +276,80 @@ async def get_run_result(  # noqa: B008
                     )
                     .where(
                         ChangeZone.result_territory_id.in_(  # type: ignore[attr-defined]
-                            list(territory_by_id.keys())
+                            territory_ids
                         )
                     )
-                    .group_by(ChangeZone.change_class)
+                    .group_by(
+                        ChangeZone.result_territory_id,
+                        ChangeZone.change_class,
+                    )
                 )
             ).all()
         )
+        boundary_rows = (
+            await session.execute(
+                select(
+                    ResultTerritory.id.label("territory_id"),  # type: ignore[attr-defined]
+                    func.ST_AsGeoJSON(
+                        AreaOfInterest.boundary
+                    ).label("geojson"),
+                )
+                .join(
+                    AreaOfInterest,
+                    AreaOfInterest.id == ResultTerritory.aoi_id,  # type: ignore[arg-type]
+                )
+                .where(ResultTerritory.result_id == analysis_result.id)  # type: ignore[arg-type]
+            )
+        ).all()
+        for row in boundary_rows:
+            if isinstance(row.geojson, str):
+                try:
+                    boundary_by_territory[row.territory_id] = json.loads(row.geojson)
+                except json.JSONDecodeError:
+                    continue
 
+    empty_stats = {
+        "retained": {"areaKm2": 0.0, "zonesCount": 0},
+        "lost": {"areaKm2": 0.0, "zonesCount": 0},
+        "new": {"areaKm2": 0.0, "zonesCount": 0},
+    }
     aggregate_stats: dict[str, dict[str, Any]] = {
         "retained": {"areaKm2": 0.0, "zonesCount": 0},
         "lost": {"areaKm2": 0.0, "zonesCount": 0},
         "new": {"areaKm2": 0.0, "zonesCount": 0},
     }
-    territories: list[dict[str, Any]] = []
-    for row in zone_rows:
-        geojson_text = row.geojson
-        if not isinstance(geojson_text, str):
-            continue
-        try:
-            geometry = json.loads(geojson_text)
-        except json.JSONDecodeError:
-            continue
-
-        change_class = str(row.change_class)
-        area_km2 = float(row.area_km2 or 0)
-        zones_count = int(row.zones_count or 0)
-        if change_class in aggregate_stats:
-            aggregate_stats[change_class]["areaKm2"] += area_km2
-            aggregate_stats[change_class]["zonesCount"] += zones_count
-        if len(territories) >= 5:
-            continue
-
-        stats: dict[str, dict[str, Any]] = {
+    stats_by_territory: dict[uuid.UUID, dict[str, dict[str, Any]]] = {
+        territory_id: {
             "retained": {"areaKm2": 0.0, "zonesCount": 0},
             "lost": {"areaKm2": 0.0, "zonesCount": 0},
             "new": {"areaKm2": 0.0, "zonesCount": 0},
         }
-        if change_class in stats:
-            stats[change_class] = {
+        for territory_id in territory_by_id
+    }
+    for row in stats_rows:
+        change_class = str(row.change_class)
+        if change_class not in aggregate_stats:
+            continue
+        area_km2 = float(row.area_km2 or 0)
+        zones_count = int(row.zones_count or 0)
+        aggregate_stats[change_class]["areaKm2"] += area_km2
+        aggregate_stats[change_class]["zonesCount"] += zones_count
+        territory_stats = stats_by_territory.get(row.territory_id)
+        if territory_stats is not None:
+            territory_stats[change_class] = {
                 "areaKm2": area_km2,
                 "zonesCount": zones_count,
             }
+
+    territories: list[dict[str, Any]] = []
+    for territory in territory_rows[:5]:
         territories.append(
             {
-                "position": len(territories) + 1,
-                "territoryName": territory_name,
+                "position": territory.position,
+                "territoryName": territory.territory_name,
                 "aoiType": "admin",
-                "boundary": geometry,
-                "stats": stats,
+                "boundary": boundary_by_territory.get(territory.id, {}),
+                "stats": stats_by_territory.get(territory.id, empty_stats),
                 "sourceRunId": str(runId),
             }
         )
@@ -317,6 +407,46 @@ async def get_run_result(  # noqa: B008
         if isinstance(raw_limitations, list)
         else []
     )
+    validation_failed = analysis_result.validation_outcome != "passed"
+    failure = diagnostics.get("failure")
+    if validation_failed and not isinstance(failure, dict):
+        # Старые неудачные запуски могли не сохранить диагностику. Показываем
+        # причину из записи запуска, а не «успешный» текст результата.
+        category = run.rejection_category or "analysis_error"
+        message = (
+            run.status_reason
+            or "Расчёт не завершён: результат и диагностика отсутствуют"
+        )
+        if message == "No change zones detected":
+            message = (
+                "Диагностика не сохранена (запуск до исправления): анализ не "
+                "сформировал зоны. Вероятная причина — Researcher/Analyst не "
+                "получили территорию или период запроса."
+            )
+        failure = {
+            "category": category,
+            "stage": "unknown",
+            "message": message,
+            "technicalSuccess": category != "analysis_error",
+            "dataQualityAssessed": category != "analysis_error",
+        }
+        diagnostics = {**diagnostics, "failure": failure}
+        diagnostics.setdefault("technicalSuccess", category != "analysis_error")
+        diagnostics.setdefault(
+            "interpretability",
+            {"status": "not_evaluated", "reasons": [message]},
+        )
+    summary_text = analysis_result.summary_text
+    explanation_text = analysis_result.explanation_text
+    if validation_failed and isinstance(failure, dict):
+        reason = str(failure.get("message") or "причина не сохранена")
+        prefix = (
+            "Технический сбой"
+            if str(failure.get("category")) == "analysis_error"
+            else "Результат не прошёл проверку"
+        )
+        summary_text = f"{prefix}: {reason}"
+        explanation_text = summary_text
     aggregate = {
         "retained": aggregate_stats["retained"],
         "lost": aggregate_stats["lost"],
@@ -336,8 +466,8 @@ async def get_run_result(  # noqa: B008
         ),
         hasOverlap=analysis_result.has_overlap,
         crs=analysis_result.crs,
-        summaryText=analysis_result.summary_text,
-        explanationText=analysis_result.explanation_text,
+        summaryText=summary_text,
+        explanationText=explanation_text,
         sources=sources,
         citations=citations,
         validationOutcome=analysis_result.validation_outcome,

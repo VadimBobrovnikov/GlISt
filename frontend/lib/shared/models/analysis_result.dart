@@ -272,6 +272,29 @@ class AnalysisResult {
     return value is num ? value.toDouble() : null;
   }
 
+  /// Диагностика отказа (если расчёт не завершён).
+  Map<String, dynamic> get failure => JsonUtils.asMap(diagnostics['failure']);
+
+  /// Технический сбой (чтение/поиск/таймаут) либо отказ качества данных.
+  bool get isTechnicalFailure => failure['category'] == 'analysis_error';
+
+  /// Сообщение о причине отказа.
+  String get failureMessage =>
+      JsonUtils.asStringOr(failure['message'], '').trim();
+
+  /// Этап отказа (scene_read, stac_search, coverage, input_validation…).
+  String get failureStage =>
+      JsonUtils.asStringOr(failure['stage'], '').trim();
+
+  /// Суммарное количество зон изменений.
+  int get zonesCount =>
+      aggregate.retained.zonesCount +
+      aggregate.lost.zonesCount +
+      aggregate.newZones.zonesCount;
+
+  /// Есть ли рассчитанный результат (зоны), пригодный для карты и экспорта.
+  bool get hasZones => zonesCount > 0;
+
   /// Создаёт модель из JSON-объекта контракта.
   factory AnalysisResult.fromJson(Map<String, dynamic> json) {
     return AnalysisResult(

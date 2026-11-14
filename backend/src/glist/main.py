@@ -25,6 +25,8 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    # Без этого браузер не видит имя файла артефакта (PDF/GeoJSON).
+    expose_headers=["Content-Disposition", "Content-Length"],
 )
 
 app.include_router(health.router)

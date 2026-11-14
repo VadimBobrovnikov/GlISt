@@ -213,6 +213,32 @@ def _asset_href(item: Any, *names: str) -> str | None:
     return None
 
 
+def _asset_scaling(
+    item: dict[str, Any],
+    *names: str,
+) -> tuple[float | None, float | None]:
+    """Scale/offset band из метаданных STAC-ассета (``raster:bands``)."""
+    assets = item.get("assets")
+    if not isinstance(assets, dict):
+        return None, None
+    for name in names:
+        asset = assets.get(name)
+        if not isinstance(asset, dict):
+            continue
+        bands = asset.get("raster:bands")
+        if not isinstance(bands, list) or not bands:
+            continue
+        band = bands[0]
+        if not isinstance(band, dict):
+            continue
+        raw_scale = band.get("scale")
+        raw_offset = band.get("offset")
+        scale = float(raw_scale) if isinstance(raw_scale, (int, float)) else None
+        offset = float(raw_offset) if isinstance(raw_offset, (int, float)) else None
+        return scale, offset
+    return None, None
+
+
 def _iter_search_items(search: Any) -> list[Any]:
     """Возвращает элементы поиска (совместимо с ItemSearch.items()/списком)."""
     raw_items = getattr(search, "items", [])
@@ -275,6 +301,11 @@ def _search_sentinel2_scenes_sync(
             continue
         green_url = _asset_href(item, "green", "B03", "b03")
         blue_url = _asset_href(item, "blue", "B02", "b02")
+        red_scale, red_offset = _asset_scaling(item, "red", "B04", "b04")
+        green_scale, green_offset = _asset_scaling(item, "green", "B03", "b03")
+        blue_scale, blue_offset = _asset_scaling(item, "blue", "B02", "b02")
+        nir_scale, nir_offset = _asset_scaling(item, "nir", "B08", "b08")
+        scl_scale, scl_offset = _asset_scaling(item, "scl", "SCL")
 
         properties = item.get("properties", {})
         if not isinstance(properties, dict):
@@ -289,20 +320,43 @@ def _search_sentinel2_scenes_sync(
         if cloud_cover > max_cloud_cover:
             continue
 
-        scenes.append(
-            {
-                "id": str(item.get("id", "")),
-                "datetime": properties.get("datetime"),
-                "cloud_cover": cloud_cover,
-                "platform": properties.get("platform", "Sentinel-2"),
-                "proj_epsg": properties.get("proj:epsg"),
-                "red_url": red_url,
-                "nir_url": nir_url,
-                "scl_url": scl_url,
-                "green_url": green_url,
-                "blue_url": blue_url,
-            }
+        scene: dict[str, Any] = {
+            "id": str(item.get("id", "")),
+            "datetime": properties.get("datetime"),
+            "cloud_cover": cloud_cover,
+            "platform": properties.get("platform", "Sentinel-2"),
+            "proj_epsg": properties.get("proj:epsg"),
+            "red_url": red_url,
+            "nir_url": nir_url,
+            "scl_url": scl_url,
+            "green_url": green_url,
+            "blue_url": blue_url,
+        }
+        boa_dn = properties.get(
+            "s2:boa_add_offset", properties.get("boa_add_offset")
         )
+        if isinstance(boa_dn, (int, float)):
+            scene["boa_offset_dn"] = float(boa_dn)
+        boa_applied = properties.get("earthsearch:boa_offset_applied")
+        if isinstance(boa_applied, bool):
+            scene["boa_offset_applied"] = boa_applied
+        # Ключи коррекции добавляются только при наличии метаданных: отсутствие
+        # scale/offset не должно превращаться в фиктивное значение.
+        for key, value in (
+            ("red_scale", red_scale),
+            ("red_offset", red_offset),
+            ("green_scale", green_scale),
+            ("green_offset", green_offset),
+            ("blue_scale", blue_scale),
+            ("blue_offset", blue_offset),
+            ("nir_scale", nir_scale),
+            ("nir_offset", nir_offset),
+            ("scl_scale", scl_scale),
+            ("scl_offset", scl_offset),
+        ):
+            if value is not None:
+                scene[key] = value
+        scenes.append(scene)
         if len(scenes) >= limit:
             break
     return scenes

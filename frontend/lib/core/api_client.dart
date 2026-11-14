@@ -130,6 +130,17 @@ class ApiClient {
   String previewUrl(String runId, String period) =>
       absoluteUrl('/api/v1/runs/$runId/preview?period=$period');
 
+  /// GeoJSON зон изменений (упрощённая геометрия) для карты.
+  Future<String> getRunZones(String runId) async {
+    final Response<String> response = await _send(
+      () => _dio.get<String>(
+        '/api/v1/runs/$runId/zones',
+        options: Options(responseType: ResponseType.plain),
+      ),
+    );
+    return response.data ?? '';
+  }
+
   /// NDVI до/после и класс перехода для точки.
   Future<Map<String, dynamic>> sampleRun(
     String runId,
@@ -163,10 +174,22 @@ class ApiClient {
     final String? contentType = response.headers.value('content-type');
     return DownloadedFile(
       bytes: Uint8List.fromList(bytes),
-      filename:
-          _filenameFromDisposition(disposition) ?? 'glist-export.bin',
+      filename: _filenameFromDisposition(disposition) ??
+          _fallbackFilename(contentType),
       mimeType: contentType ?? 'application/octet-stream',
     );
+  }
+
+  /// Имя файла, если сервер не прислал Content-Disposition.
+  String _fallbackFilename(String? contentType) {
+    final String mime = (contentType ?? '').toLowerCase();
+    if (mime.contains('pdf')) {
+      return 'glist-export.pdf';
+    }
+    if (mime.contains('geo+json') || mime.contains('json')) {
+      return 'glist-export.geojson';
+    }
+    return 'glist-export.bin';
   }
 
   String? _filenameFromDisposition(String? disposition) {

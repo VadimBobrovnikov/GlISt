@@ -23,6 +23,7 @@ class ResultScreen extends StatefulWidget {
 class _ResultScreenState extends State<ResultScreen> {
   ApiClient? _client;
   AnalysisResult? _result;
+  String? _zonesGeoJson;
   String? _error;
   bool _loading = true;
   bool _started = false;
@@ -48,11 +49,19 @@ class _ResultScreenState extends State<ResultScreen> {
     });
     try {
       final AnalysisResult result = await client.getRunResult(widget.runId);
+      String? zones;
+      try {
+        zones = await client.getRunZones(widget.runId);
+      } on Exception {
+        // Карта без зон — не повод ломать экран результата.
+        zones = null;
+      }
       if (!mounted) {
         return;
       }
       setState(() {
         _result = result;
+        _zonesGeoJson = zones;
         _loading = false;
       });
     } on ApiException catch (error) {
@@ -117,6 +126,13 @@ class _ResultScreenState extends State<ResultScreen> {
   }
 
   Widget _buildContent(BuildContext context, AnalysisResult result) {
+    if (result.validationOutcome == ValidationOutcome.failed &&
+        !result.hasZones) {
+      return _buildFailure(context, result);
+    }
+    if (!result.hasZones) {
+      return _buildEmptyResult(result);
+    }
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         final bool wide = constraints.maxWidth >= 980;
@@ -124,18 +140,205 @@ class _ResultScreenState extends State<ResultScreen> {
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              Expanded(child: MapView(result: result)),
+              Expanded(
+                child: MapView(
+                  result: result,
+                  changeZonesGeoJson: _zonesGeoJson,
+                ),
+              ),
               SizedBox(width: 400, child: _buildPanel(context, result)),
             ],
           );
         }
         return Column(
           children: <Widget>[
-            SizedBox(height: 320, child: MapView(result: result)),
+            SizedBox(
+              height: 320,
+              child: MapView(
+                result: result,
+                changeZonesGeoJson: _zonesGeoJson,
+              ),
+            ),
             Expanded(child: _buildPanel(context, result)),
           ],
         );
       },
+    );
+  }
+
+  String _stageLabel(String stage) {
+    switch (stage) {
+      case 'input_validation':
+        return 'параметры запроса';
+      case 'geocoding':
+        return 'определение границ территории';
+      case 'stac_search':
+        return 'поиск сцен Sentinel-2';
+      case 'scene_read':
+        return 'чтение сцен (COG)';
+      case 'coverage':
+        return 'оценка покрытия';
+      case 'unknown':
+        return 'не зафиксирован (запуск до исправления)';
+      default:
+        return stage;
+    }
+  }
+
+  Widget _buildFailure(BuildContext context, AnalysisResult result) {
+    final bool technical = result.isTechnicalFailure;
+    final String reason = result.failureMessage.isNotEmpty
+        ? result.failureMessage
+        : (result.summaryText.trim().isNotEmpty
+            ? result.summaryText.trim()
+            : 'Расчёт не завершён: результат отсутствует');
+    final String stage = _stageLabel(result.failureStage);
+    final double? shared = result.sharedCoverage;
+    final Color accent = technical ? AppColors.lost : AppColors.warningText;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Icon(
+                    technical
+                        ? Icons.error_outline
+                        : Icons.warning_amber_rounded,
+                    color: accent,
+                    size: 28,
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      technical
+                          ? 'Технический сбой расчёта'
+                          : 'Недостаточно данных для интерпретации',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: accent,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Text(
+                reason,
+                style: const TextStyle(fontSize: 14, color: AppColors.text),
+              ),
+              if (stage.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 6),
+                Text(
+                  'Этап: $stage',
+                  style: const TextStyle(fontSize: 12, color: AppColors.muted),
+                ),
+              ],
+              const SizedBox(height: 12),
+              Text(
+                shared == null
+                    ? 'Покрытие не рассчитано: данные не прочитаны '
+                        'или расчёт не выполнялся.'
+                    : 'Общее валидное покрытие: '
+                        '${(shared * 100).toStringAsFixed(1)}%',
+                style: const TextStyle(fontSize: 13, color: AppColors.text),
+              ),
+              for (final String limitation in result.qualityLimitations)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    '• $limitation',
+                    style: TextStyle(fontSize: 12, color: accent),
+                  ),
+                ),
+              const SizedBox(height: 12),
+              const Text(
+                'Зоны изменений и площади отсутствуют. Экспорт результата '
+                'недоступен — это диагностическое состояние запуска.',
+                style: TextStyle(fontSize: 12, color: AppColors.muted),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Запуск: ${result.runId}',
+                style: const TextStyle(fontSize: 11, color: AppColors.muted),
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton(
+                onPressed: () => Navigator.of(context).maybePop(),
+                child: const Text('Назад'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmptyResult(AnalysisResult result) {
+    final double? shared = result.sharedCoverage;
+    return Center(
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.all(24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 720),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const Row(
+                children: <Widget>[
+                  Icon(Icons.info_outline, color: AppColors.primary, size: 28),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Зон изменений не обнаружено',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.text,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'Расчёт завершён, но в выбранной области и периоде зоны '
+                'изменений не выделены.',
+                style: TextStyle(fontSize: 14, color: AppColors.text),
+              ),
+              if (shared != null) ...<Widget>[
+                const SizedBox(height: 8),
+                Text(
+                  'Общее валидное покрытие: '
+                  '${(shared * 100).toStringAsFixed(1)}%',
+                  style: const TextStyle(fontSize: 13, color: AppColors.text),
+                ),
+              ],
+              for (final String limitation in result.qualityLimitations)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    '• $limitation',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppColors.warningText,
+                    ),
+                  ),
+                ),
+              const SizedBox(height: 12),
+              const Text(
+                'Экспорт недоступен: нет зон изменений.',
+                style: TextStyle(fontSize: 12, color: AppColors.muted),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -254,26 +457,32 @@ class _ResultScreenState extends State<ResultScreen> {
             const SizedBox(height: 12),
             _sourcesList(result),
             const SizedBox(height: 24),
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: <Widget>[
-                SizedBox(
-                  width: 160,
-                  child: ExportButton(
-                    runId: result.runId,
-                    format: ExportFormat.pdf,
+            if (result.hasZones)
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: <Widget>[
+                  SizedBox(
+                    width: 160,
+                    child: ExportButton(
+                      runId: result.runId,
+                      format: ExportFormat.pdf,
+                    ),
                   ),
-                ),
-                SizedBox(
-                  width: 160,
-                  child: ExportButton(
-                    runId: result.runId,
-                    format: ExportFormat.geojson,
+                  SizedBox(
+                    width: 160,
+                    child: ExportButton(
+                      runId: result.runId,
+                      format: ExportFormat.geojson,
+                    ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              )
+            else
+              const Text(
+                'Экспорт недоступен: нет зон изменений.',
+                style: TextStyle(fontSize: 12, color: AppColors.muted),
+              ),
           ],
         ),
       ),
@@ -344,8 +553,23 @@ class _ResultScreenState extends State<ResultScreen> {
 
   Widget _qualityBox(AnalysisResult result) {
     final double? shared = result.sharedCoverage;
+    final Object? sharedAreaRaw = result.coverage['sharedValidAreaKm2'];
+    final Object? unknownAreaRaw = result.coverage['unknownAreaKm2'];
+    final Object? unknownRaw = result.coverage['unknown'];
+    final double? sharedArea =
+        sharedAreaRaw is num ? sharedAreaRaw.toDouble() : null;
+    final double? unknownArea =
+        unknownAreaRaw is num ? unknownAreaRaw.toDouble() : null;
+    final double? unknownShare = unknownRaw is num ? unknownRaw.toDouble() : null;
     final Map<String, dynamic> dates =
         JsonUtils.asMap(result.diagnostics['actualDates']);
+    final Map<String, dynamic> requested =
+        JsonUtils.asMap(result.diagnostics['requestedPeriod']);
+    final Map<String, dynamic> selection =
+        JsonUtils.asMap(result.diagnostics['periodSelection']);
+    final Map<String, dynamic> usedCenters =
+        JsonUtils.asMap(selection['usedCenters']);
+    final bool seasonAdjusted = selection['seasonAdjusted'] == true;
     final String before = JsonUtils.asList(dates['start'])
         .whereType<String>()
         .join(', ');
@@ -395,7 +619,17 @@ class _ResultScreenState extends State<ResultScreen> {
             const SizedBox(height: 6),
             Text(
               'Общее валидное покрытие обеих дат: '
-              '${(shared * 100).toStringAsFixed(1)}%',
+              '${(shared * 100).toStringAsFixed(1)}%'
+              '${sharedArea == null ? '' : ' · ${_formatArea(sharedArea)}'}',
+              style: const TextStyle(fontSize: 12, color: AppColors.text),
+            ),
+          ],
+          if (unknownShare != null) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(
+              'Неизвестно (NoData/облака/тени/снег хотя бы на одной дате): '
+              '${(unknownShare * 100).toStringAsFixed(1)}%'
+              '${unknownArea == null ? '' : ' · ${_formatArea(unknownArea)}'}',
               style: const TextStyle(fontSize: 12, color: AppColors.text),
             ),
           ],
@@ -405,6 +639,27 @@ class _ResultScreenState extends State<ResultScreen> {
               'Фактические даты: до ${before.isEmpty ? '—' : before}; '
               'после ${after.isEmpty ? '—' : after}.',
               style: const TextStyle(fontSize: 12, color: AppColors.text),
+            ),
+          ],
+          if (requested.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(
+              'Запрошенный период: '
+              '${requested['start'] ?? '—'}…${requested['end'] ?? '—'}.',
+              style: const TextStyle(fontSize: 12, color: AppColors.text),
+            ),
+          ],
+          if (seasonAdjusted && usedCenters.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(
+              'Запрошенные даты заменены сопоставимым сезонным окном: '
+              '${usedCenters['start'] ?? '—'}…${usedCenters['end'] ?? '—'} '
+              '(сравниваются одинаковые сезоны разных лет).',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: AppColors.warningText,
+              ),
             ),
           ],
           for (final String limitation in limitations)

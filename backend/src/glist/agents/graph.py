@@ -24,7 +24,7 @@ def route_after_validator(state: dict[str, Any]) -> str:
     """
     validation: dict[str, Any] = state.get("validation", {})
     outcome: str = validation.get("outcome", "failed")
-    category: str = validation.get("category", "data_quality")
+    category: str = validation.get("category", "analysis_error")
     attempt_count: int = state.get("attempt_count", 0)
 
     # Logic for routing

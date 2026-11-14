@@ -66,6 +66,14 @@ async def create_export(  # noqa: B008
             status_code=status.HTTP_409_CONFLICT,
             detail="Результат ещё не готов",
         )
+    if not data.zones:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Нет зон изменений: экспорт результата недоступен. "
+                "Запуск содержит только диагностику."
+            ),
+        )
 
     settings = get_settings()
     path = write_export_file(data, body.format, settings.artifacts_dir)

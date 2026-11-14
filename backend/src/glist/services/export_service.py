@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -146,11 +147,27 @@ def build_geojson(data: ExportData) -> dict[str, Any]:
                 },
             }
         )
+    scenes = _as_dict(data.diagnostics.get("scenes"))
+    start_count = len(scenes.get("start") or []) if isinstance(scenes.get("start"), list) else 0
+    end_count = len(scenes.get("end") or []) if isinstance(scenes.get("end"), list) else 0
     return {
         "type": "FeatureCollection",
         "crs": {
             "type": "name",
             "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"},
+        },
+        "properties": {
+            "runId": str(data.run_id),
+            "resultId": str(data.result.id),
+            "generatedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+            "mode": str(getattr(data.result, "mode", "single") or "single"),
+            "territoriesCount": max(
+                1,
+                min(5, int(getattr(data.result, "territories_count", 1) or 1)),
+            ),
+            "hasOverlap": bool(getattr(data.result, "has_overlap", False)),
+            "aggregateNote": "сумма по территориям (с возможным пересечением)",
+            "sourcesCount": start_count + end_count,
         },
         "features": features,
     }
@@ -289,13 +306,44 @@ def build_pdf(data: ExportData) -> bytes:
     story.extend([Spacer(1, 6), table, Spacer(1, 6)])
 
     story.append(Paragraph("Качество данных", header_style))
+    shared_area = coverage.get("sharedValidAreaKm2")
+    unknown_area = coverage.get("unknownAreaKm2")
     story.append(
         Paragraph(
             "Валидное покрытие: "
             f"начало {float(coverage.get('validStart') or 0) * 100:.1f}%, "
             f"конец {float(coverage.get('validEnd') or 0) * 100:.1f}%, "
             "общее "
-            f"{float(coverage.get('sharedValid') or 0) * 100:.1f}%.",
+            f"{float(coverage.get('sharedValid') or 0) * 100:.1f}%. "
+            "Неизвестно (NoData/облака/тени/снег хотя бы на одной дате): "
+            f"{float(coverage.get('unknown') or 0) * 100:.1f}%"
+            + (
+                f", площадь общего валидного покрытия "
+                f"{format_area_km2(float(shared_area))}, "
+                f"неизвестно {format_area_km2(float(unknown_area))}"
+                if isinstance(shared_area, (int, float))
+                and isinstance(unknown_area, (int, float))
+                else ""
+            )
+            + ".",
+            body_style,
+        )
+    )
+    requested = _as_dict(data.diagnostics.get("requestedPeriod"))
+    actual_dates = _as_dict(data.diagnostics.get("actualDates"))
+
+    def _dates_text(values: object) -> str:
+        if isinstance(values, list) and values:
+            return ", ".join(str(item) for item in values)
+        return "—"
+
+    story.append(
+        Paragraph(
+            "Запрошенный период: "
+            f"{requested.get('start') or '—'}…{requested.get('end') or '—'}; "
+            "фактические даты: "
+            f"начало {_dates_text(actual_dates.get('start'))}, "
+            f"конец {_dates_text(actual_dates.get('end'))}.",
             body_style,
         )
     )

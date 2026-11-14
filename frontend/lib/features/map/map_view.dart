@@ -138,12 +138,14 @@ class MapView extends StatefulWidget {
 class _MapViewState extends State<MapView> {
   final MapController _controller = MapController();
   final Set<ChangeClass> _visible = <ChangeClass>{
+    ChangeClass.retained,
     ChangeClass.lost,
     ChangeClass.newZone,
   };
   ApiClient? _client;
   bool _showPolygons = true;
   bool _showPreview = true;
+  bool _showUnknown = false;
   String _period = 'end';
   double _previewOpacity = 0.65;
   Map<String, dynamic>? _sample;
@@ -174,6 +176,31 @@ class _MapViewState extends State<MapView> {
     }
     final Object? items = scenes[period];
     return items is List<dynamic> && items.isNotEmpty;
+  }
+
+  double? get _sharedCoverage {
+    final Object? value = widget.result.coverage['sharedValid'];
+    return value is num ? value.toDouble() : null;
+  }
+
+  double? get _unknownCoverage {
+    final Object? value = widget.result.coverage['unknown'];
+    return value is num ? value.toDouble() : null;
+  }
+
+  double? _coverageArea(String key) {
+    final Object? value = widget.result.coverage[key];
+    return value is num ? value.toDouble() : null;
+  }
+
+  String _formatCoverageArea(double? areaKm2) {
+    if (areaKm2 == null) {
+      return '';
+    }
+    if (areaKm2.abs() < 1) {
+      return ' · ${areaKm2.toStringAsFixed(2)} км²';
+    }
+    return ' · ${areaKm2.toStringAsFixed(1)} км²';
   }
 
   Future<void> _sampleAt(LatLng point) async {
@@ -338,6 +365,22 @@ class _MapViewState extends State<MapView> {
                   ),
                 ],
               ),
+            if (previewBounds != null &&
+                _client != null &&
+                _showUnknown &&
+                _hasScenes('start') &&
+                _hasScenes('end'))
+              OverlayImageLayer(
+                overlayImages: <OverlayImage>[
+                  OverlayImage(
+                    bounds: previewBounds,
+                    imageProvider: NetworkImage(
+                      _client!.previewUrl(widget.result.runId, 'unknown'),
+                    ),
+                    opacity: _previewOpacity,
+                  ),
+                ],
+              ),
             if (_showPolygons) PolygonLayer(polygons: polygons),
           ],
         ),
@@ -485,6 +528,24 @@ class _MapViewState extends State<MapView> {
             _showPreview,
             (bool value) => setState(() => _showPreview = value),
           ),
+          _switchRow(
+            'Неизвестно (облака/NoData)',
+            _showUnknown,
+            (bool value) => setState(() => _showUnknown = value),
+          ),
+          if (_sharedCoverage != null)
+            Text(
+              'Валидно на обеих датах: '
+              '${(_sharedCoverage! * 100).toStringAsFixed(1)}%'
+              '${_formatCoverageArea(_coverageArea('sharedValidAreaKm2'))}',
+              style: const TextStyle(fontSize: 10, color: AppColors.muted),
+            ),
+          if (_unknownCoverage != null)
+            Text(
+              'Неизвестно: ${(_unknownCoverage! * 100).toStringAsFixed(1)}%'
+              '${_formatCoverageArea(_coverageArea('unknownAreaKm2'))}',
+              style: const TextStyle(fontSize: 10, color: AppColors.muted),
+            ),
           Row(
             children: <Widget>[
               const Text(
@@ -655,6 +716,8 @@ class _MapViewState extends State<MapView> {
           _legendRow(ChangeClass.retained, 'Сохранившиеся', AppColors.retained),
           _legendRow(ChangeClass.lost, 'Потерянные', AppColors.lost),
           _legendRow(ChangeClass.newZone, 'Новые зоны', AppColors.newZone),
+          const SizedBox(height: 6),
+          _unknownLegendRow(),
         ],
       ),
     );
@@ -700,11 +763,64 @@ class _MapViewState extends State<MapView> {
     );
   }
 
+  Widget _unknownLegendRow() {
+    final double? unknown = _unknownCoverage;
+    final String label = unknown == null
+        ? 'Неизвестно (облака/NoData)'
+        : 'Неизвестно ${(unknown * 100).toStringAsFixed(1)}%';
+    return InkWell(
+      onTap: () => setState(() => _showUnknown = !_showUnknown),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Container(
+              width: 16,
+              height: 16,
+              decoration: BoxDecoration(
+                color: _showUnknown ? AppColors.muted : AppColors.surface,
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(
+                  color: _showUnknown ? AppColors.muted : AppColors.border,
+                ),
+              ),
+              child: _showUnknown
+                  ? const Icon(Icons.check, size: 12, color: Colors.white)
+                  : null,
+            ),
+            const SizedBox(width: 8),
+            Container(
+              width: 10,
+              height: 10,
+              decoration: const BoxDecoration(color: AppColors.muted),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: const TextStyle(fontSize: 12, color: AppColors.text),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _statusBadge() {
     final bool passed =
         widget.result.validationOutcome == ValidationOutcome.passed;
+    final int zonesCount = widget.result.aggregate.retained.zonesCount +
+        widget.result.aggregate.lost.zonesCount +
+        widget.result.aggregate.newZones.zonesCount;
+    final bool limited = !passed && zonesCount > 0;
     final Color background = passed ? AppColors.successBg : AppColors.warningBg;
     final Color foreground = passed ? AppColors.successText : AppColors.warningText;
+    final IconData icon = passed
+        ? Icons.check_circle
+        : (limited ? Icons.warning_amber_rounded : Icons.error_outline);
+    final String label = passed
+        ? 'Статус: Завершено'
+        : (limited ? 'Рассчитано с ограничениями' : 'Не прошёл проверку');
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -714,10 +830,10 @@ class _MapViewState extends State<MapView> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Icon(Icons.check_circle, size: 14, color: foreground),
+          Icon(icon, size: 14, color: foreground),
           const SizedBox(width: 6),
           Text(
-            passed ? 'Статус: Завершено' : 'Статус: Не прошёл проверку',
+            label,
             style: TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,

@@ -22,15 +22,38 @@ async def validator_node(state: dict[str, Any]) -> dict[str, Any]:
     context: dict[str, Any] = state.get("context", {})
     change_zones: list[dict[str, Any]] = context.get("change_zones", [])
     attempt_no: int = state.get("attempt_count", 0)
+    sufficient = context.get("analysis_sufficient")
+    diagnostics = context.get("analysis_diagnostics") or {}
+    raw_limitations = (
+        diagnostics.get("limitations") if isinstance(diagnostics, dict) else None
+    )
+    limitations = (
+        [str(item) for item in raw_limitations]
+        if isinstance(raw_limitations, list)
+        else []
+    )
+    analysis_error = context.get("analysis_error")
+    failure = context.get("analysis_failure")
+    failure_category = (
+        str(failure.get("category")) if isinstance(failure, dict) else None
+    )
 
     if not change_zones:
-        sufficient = bool(context.get("analysis_sufficient"))
+        reasons: list[str] = []
+        if isinstance(analysis_error, str) and analysis_error.strip():
+            reasons.append(analysis_error.strip())
+        reasons.extend(limitations)
+        if not reasons:
+            reasons.append("No change zones detected")
+        category = failure_category or (
+            "analysis_error" if sufficient else "data_quality"
+        )
         return {
             "validation": {
                 "outcome": "passed" if sufficient else "failed",
-                "category": "analysis_error" if sufficient else "data_quality",
+                "category": category,
                 "attempt_no": attempt_no,
-                "reasons": [] if sufficient else ["No change zones detected"],
+                "reasons": [] if sufficient else reasons,
                 "fixes_applied": [],
             },
             "next_agent": "finalize",
@@ -63,6 +86,24 @@ async def validator_node(state: dict[str, Any]) -> dict[str, Any]:
                 "category": "analysis_error",
                 "attempt_no": attempt_no,
                 "reasons": validation_errors,
+                "fixes_applied": [],
+            },
+            "next_agent": "finalize",
+        }
+
+    # Все зоны структурно валидны. Технический успех расчёта не равен
+    # пригодности данных для интерпретации: при ограничениях качества
+    # результат отклоняется с категорией data_quality и списком ограничений.
+    if sufficient is False:
+        reasons = limitations or [
+            "Недостаточно пригодных данных для интерпретации изменений"
+        ]
+        return {
+            "validation": {
+                "outcome": "failed",
+                "category": "data_quality",
+                "attempt_no": attempt_no,
+                "reasons": reasons,
                 "fixes_applied": [],
             },
             "next_agent": "finalize",

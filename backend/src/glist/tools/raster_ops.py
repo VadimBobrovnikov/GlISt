@@ -6,15 +6,24 @@ Provides functions for working with raster data using rasterio and numpy:
 - Median composite creation
 """
 
+import logging
+import math
+import numbers
 import warnings
 from typing import Any, cast
 
 import numpy as np
 import rasterio
+from rasterio.crs import CRS
 from rasterio.enums import Resampling
 from rasterio.transform import Affine
+from rasterio.warp import reproject as warp_reproject
 from rasterio.warp import transform_bounds
 from rasterio.windows import from_bounds
+
+logger = logging.getLogger(__name__)
+
+_SCALE_EPS = 1e-12
 
 
 def calculate_ndvi(red_band: np.ndarray, nir_band: np.ndarray) -> np.ndarray:
@@ -162,6 +171,174 @@ def read_band(
     return band, transform
 
 
+def resolve_band_scaling(
+    declared_scale: float | None,
+    declared_offset: float | None,
+    requested_scale: float = 1.0,
+    requested_offset: float = 0.0,
+) -> tuple[float, float, str]:
+    """Выбирает ровно одну коррекцию яркости: из растра или запрошенную.
+
+    Семантика STAC/GDAL: ``value = dn * scale + offset``, где ``offset`` уже
+    в единицах результата (отражательная способность). Если растр объявляет
+    собственную шкалу/смещение, они применяются ровно один раз, а запрошенные
+    значения не добавляются (иначе была бы двойная коррекция).
+
+    Смещение BOA_ADD_OFFSET в DN нужно привести к единицам результата заранее:
+    ``offset = boa_dn_offset * scale`` (это делает вызывающий код явно).
+
+    Args:
+        declared_scale: Шкала из метаданных растра (``src.scales``).
+        declared_offset: Смещение из метаданных растра (``src.offsets``).
+        requested_scale: Шкала, запрошенная вызывающим кодом.
+        requested_offset: Смещение в единицах результата.
+
+    Returns:
+        ``(scale, offset, source)``; ``source`` — ``"dataset"`` или
+        ``"requested"``.
+    """
+    if (
+        declared_scale is not None
+        and declared_offset is not None
+        and (
+            abs(declared_scale - 1.0) > _SCALE_EPS
+            or abs(declared_offset) > _SCALE_EPS
+        )
+    ):
+        return float(declared_scale), float(declared_offset), "dataset"
+    return float(requested_scale), float(requested_offset), "requested"
+
+
+def _dataset_scaling(
+    src: Any,
+    band_number: int,
+) -> tuple[float | None, float | None]:
+    """Читает объявленные scale/offset растра (только реальные числа)."""
+    index = band_number - 1
+    try:
+        scales = src.scales
+        offsets = src.offsets
+    except Exception:  # noqa: BLE001 — метаданные не обязательны
+        return None, None
+    scale_value = None
+    offset_value = None
+    try:
+        raw_scale = scales[index] if scales else None
+        if isinstance(raw_scale, numbers.Real):
+            scale_value = float(cast(float, raw_scale))
+    except (TypeError, ValueError, IndexError):
+        scale_value = None
+    try:
+        raw_offset = offsets[index] if offsets else None
+        if isinstance(raw_offset, numbers.Real):
+            offset_value = float(cast(float, raw_offset))
+    except (TypeError, ValueError, IndexError):
+        offset_value = None
+    return scale_value, offset_value
+
+
+def grid_pixel_area_m2(
+    transform: Affine,
+    crs: Any,
+    latitude: float,
+) -> float | None:
+    """Площадь пикселя сетки в м² (географическая CRS — приближённо).
+
+    Для площадных CRS используется определитель аффинного преобразования и
+    коэффициент единиц. Для географических CRS ширина/высота пикселя в
+    градусах переводится в метры по широте центра окна. Если CRS неизвестна,
+    площадь не рассчитывается (``None``) — выдумывать единицы нельзя.
+    """
+    determinant = abs(
+        float(transform.a) * float(transform.e)
+        - float(transform.b) * float(transform.d)
+    )
+    if determinant <= 0:
+        return None
+    try:
+        crs_obj = CRS.from_user_input(crs) if crs is not None else None
+    except Exception:  # noqa: BLE001 — неизвестная CRS
+        return None
+    if crs_obj is None:
+        return None
+    if crs_obj.is_projected:
+        factor = 1.0
+        try:
+            units = crs_obj.linear_units_factor
+            if isinstance(units, tuple) and len(units) >= 2:
+                factor = float(units[1])
+        except Exception:  # noqa: BLE001 — оставляем метры
+            factor = 1.0
+        return determinant * factor * factor
+    if crs_obj.is_geographic:
+        lat = math.radians(latitude)
+        m_per_deg_lat = (
+            111132.92
+            - 559.82 * math.cos(2 * lat)
+            + 1.175 * math.cos(4 * lat)
+        )
+        m_per_deg_lon = (
+            111412.84 * math.cos(lat)
+            - 93.5 * math.cos(3 * lat)
+            + 0.118 * math.cos(5 * lat)
+        )
+        return (
+            abs(float(transform.a)) * m_per_deg_lon
+            * abs(float(transform.e)) * m_per_deg_lat
+        )
+    return None
+
+
+def reproject_to_grid(
+    data: np.ndarray,
+    *,
+    src_transform: Affine,
+    src_crs: Any,
+    dst_transform: Affine,
+    dst_crs: Any,
+    dst_shape: tuple[int, int],
+    resampling: Resampling = Resampling.nearest,
+) -> np.ndarray:
+    """Приводит растр к целевой сетке (CRS/transform/shape).
+
+    Нужен, чтобы сравнивать даты пиксель-в-пиксель, когда сетки сцен
+    различаются. Геометрия/площади полигонов здесь не считаются.
+    """
+    rows, cols = int(dst_shape[0]), int(dst_shape[1])
+    if rows <= 0 or cols <= 0 or data.size == 0:
+        return np.full((max(rows, 0), max(cols, 0)), np.nan, dtype=np.float32)
+    destination = np.full((rows, cols), np.nan, dtype=np.float32)
+    warp_reproject(
+        source=data.astype(np.float32),
+        destination=destination,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        src_nodata=np.nan,
+        dst_nodata=np.nan,
+        resampling=resampling,
+    )
+    return destination
+
+
+def _read_options(src: Any) -> dict[str, Any]:
+    """Опции чтения окна: у края тайла окно не должно обрезаться.
+
+    ``from_bounds`` может дать отрицательный ``col_off``/``row_off`` (bbox
+    выходит за тайл). Без ``boundless`` rasterio вернёт только пересечение,
+    и композит молча сожмётся до самого узкого окна. Для реального датасета
+    читаем окно целиком, а пиксели вне тайла заполняем 0: SCL-класс 0 —
+    NoData, поэтому RED/NIR там будут замаскированы.
+    """
+    if isinstance(src.width, numbers.Integral) and isinstance(
+        src.height, numbers.Integral
+    ):
+        return {"boundless": True, "fill_value": 0}
+    # Моки/нестандартные датасеты: сохраняем обычное чтение.
+    return {}
+
+
 def read_cog_window(
     cog_url: str,
     bbox: tuple[float, float, float, float],
@@ -169,6 +346,7 @@ def read_cog_window(
     scale: float = 1.0,
     out_shape: tuple[int, int] | None = None,
     resampling: Resampling = Resampling.nearest,
+    offset: float = 0.0,
 ) -> tuple[np.ndarray, Any]:
     """Читает только окно COG-файла, покрывающее bbox (EPSG:4326).
 
@@ -183,6 +361,10 @@ def read_cog_window(
         out_shape: Привести окно к размеру ``(rows, cols)`` (например, SCL 20 м
             к сетке RED/NIR 10 м).
         resampling: Метод ресемплинга при ``out_shape``.
+        offset: Смещение в единицах результата (отражательная способность):
+            ``value = dn * scale + offset``. Для BOA_ADD_OFFSET в DN приведите
+            заранее: ``offset = boa_dn * scale``. Объявленные в растре
+            scale/offset имеют приоритет и не применяются повторно.
 
     Returns:
         Кортеж ``(data, transform)``: массив окна и Affine-трансформ окна.
@@ -215,22 +397,33 @@ def read_cog_window(
             transform=src.transform,
         )
         base_transform = src.window_transform(window)
+        declared_scale, declared_offset = _dataset_scaling(src, band_number)
+        scale, offset, scaling_source = resolve_band_scaling(
+            declared_scale, declared_offset, scale, offset
+        )
+        if scaling_source == "dataset":
+            logger.debug(
+                "read_cog_window: использую scale/offset растра %s (%s, %s)",
+                cog_url,
+                scale,
+                offset,
+            )
         if out_shape is None:
-            data = src.read(band_number, window=window) * scale
+            raw = src.read(band_number, window=window, **_read_options(src))
+            data = raw.astype(np.float32) * scale + offset
             transform = base_transform
         else:
             out_rows, out_cols = int(out_shape[0]), int(out_shape[1])
             if out_rows <= 0 or out_cols <= 0:
                 raise ValueError("out_shape должен содержать положительные размеры")
-            data = (
-                src.read(
-                    band_number,
-                    window=window,
-                    out_shape=(out_rows, out_cols),
-                    resampling=resampling,
-                )
-                * scale
+            raw = src.read(
+                band_number,
+                window=window,
+                out_shape=(out_rows, out_cols),
+                resampling=resampling,
+                **_read_options(src),
             )
+            data = raw.astype(np.float32) * scale + offset
             transform = base_transform @ Affine.scale(
                 window.width / out_cols,
                 window.height / out_rows,

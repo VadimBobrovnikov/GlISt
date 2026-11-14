@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -26,14 +27,76 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 PROVIDER = "nominatim"
 CACHE_TTL_DAYS = 30
 _MIN_INTERVAL_SECONDS = 1.0
+_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
+# Типы Nominatim, которые описывают территорию, а не здание/точку.
+_AREA_TYPES = frozenset(
+    {
+        "city",
+        "town",
+        "village",
+        "municipality",
+        "administrative",
+        "state",
+        "region",
+        "county",
+        "district",
+        "province",
+    }
+)
 
 _rate_lock = asyncio.Lock()
 _last_request_at = 0.0
 
 
-def _normalize(name: str) -> str:
-    """Нормализует запрос для ключа кэша."""
-    return " ".join(name.strip().lower().split())
+def _cache_key(name: str) -> str:
+    """Ключ кэша: для кириллицы учитывает страновой фильтр ``ru``."""
+    key = " ".join(name.strip().lower().split())
+    return f"{key}|ru" if _CYRILLIC.search(name) else key
+
+
+def _area_of(item: dict[str, Any]) -> float:
+    bbox = _bbox_from_boundingbox(item.get("boundingbox"))
+    if bbox is None:
+        return 0.0
+    return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+
+
+def _pick_territory(
+    data: list[Any],
+    query: str,
+) -> dict[str, Any] | None:
+    """Выбирает территорию: административный объект максимальной площади.
+
+    Nominatim на «Казани» может вернуть здание (университет) первым. Для
+    анализа нужна территория, поэтому предпочитаем city/town/region и
+    наибольший bbox.
+    """
+    candidates = [
+        item
+        for item in data
+        if isinstance(item, dict)
+        and _bbox_from_boundingbox(item.get("boundingbox")) is not None
+    ]
+    if not candidates:
+        return None
+    administrative = [
+        item
+        for item in candidates
+        if str(item.get("addresstype") or item.get("type") or "").lower()
+        in _AREA_TYPES
+    ]
+    pool = administrative or candidates
+    best = max(pool, key=_area_of)
+    bbox = _bbox_from_boundingbox(best.get("boundingbox"))
+    if bbox is None:
+        return None
+    return {
+        "name": str(best.get("display_name") or query),
+        "bbox": bbox,
+        "lat": best.get("lat"),
+        "lon": best.get("lon"),
+        "provider": PROVIDER,
+    }
 
 
 def _bbox_from_boundingbox(value: Any) -> list[float] | None:
@@ -70,9 +133,12 @@ async def _fetch_nominatim(query: str) -> dict[str, Any] | None:
     params: dict[str, str | int] = {
         "q": query,
         "format": "jsonv2",
-        "limit": 1,
+        "limit": 5,
         "addressdetails": 0,
     }
+    if _CYRILLIC.search(query):
+        # «Казани» без фильтра находит одноимённый населённый пункт в Италии.
+        params["countrycodes"] = "ru"
 
     try:
         await _throttle()
@@ -94,20 +160,9 @@ async def _fetch_nominatim(query: str) -> dict[str, Any] | None:
     except ValueError as exc:
         logger.warning("Nominatim invalid JSON for %s: %s", query, exc)
         return None
-    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+    if not isinstance(data, list) or not data:
         return None
-
-    first = data[0]
-    bbox = _bbox_from_boundingbox(first.get("boundingbox"))
-    if bbox is None:
-        return None
-    return {
-        "name": str(first.get("display_name") or query),
-        "bbox": bbox,
-        "lat": first.get("lat"),
-        "lon": first.get("lon"),
-        "provider": PROVIDER,
-    }
+    return _pick_territory(data, query)
 
 
 async def geocode_territory(
@@ -129,7 +184,7 @@ async def geocode_territory(
     if not query:
         return None
 
-    normalized = _normalize(query)
+    normalized = _cache_key(query)
     now = datetime.now(UTC)
 
     if use_cache:
