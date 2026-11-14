@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../../core/api_client.dart';
+import '../../core/api_provider.dart';
 import '../../core/app_theme.dart';
 import '../../shared/models/models.dart';
 
@@ -135,10 +138,81 @@ class MapView extends StatefulWidget {
 class _MapViewState extends State<MapView> {
   final MapController _controller = MapController();
   final Set<ChangeClass> _visible = <ChangeClass>{
-    ChangeClass.retained,
     ChangeClass.lost,
     ChangeClass.newZone,
   };
+  ApiClient? _client;
+  bool _showPolygons = true;
+  bool _showPreview = true;
+  String _period = 'end';
+  double _previewOpacity = 0.65;
+  Map<String, dynamic>? _sample;
+  String? _sampleError;
+  bool _sampling = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _client ??= ApiScope.of(context);
+  }
+
+  LatLngBounds? get _previewBounds {
+    final List<double>? bbox = widget.result.bbox;
+    if (bbox == null || bbox.length != 4) {
+      return null;
+    }
+    return LatLngBounds(
+      LatLng(bbox[1], bbox[0]),
+      LatLng(bbox[3], bbox[2]),
+    );
+  }
+
+  bool _hasScenes(String period) {
+    final Object? scenes = widget.result.diagnostics['scenes'];
+    if (scenes is! Map<String, dynamic>) {
+      return false;
+    }
+    final Object? items = scenes[period];
+    return items is List<dynamic> && items.isNotEmpty;
+  }
+
+  Future<void> _sampleAt(LatLng point) async {
+    final ApiClient? client = _client;
+    if (client == null) {
+      return;
+    }
+    setState(() {
+      _sampling = true;
+      _sampleError = null;
+    });
+    try {
+      final Map<String, dynamic> data = await client.sampleRun(
+        widget.result.runId,
+        point.latitude,
+        point.longitude,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _sample = data;
+      });
+    } on ApiException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _sampleError = error.message;
+        _sample = null;
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _sampling = false;
+        });
+      }
+    }
+  }
 
   List<ChangeZone> get _zones {
     final String? raw = widget.changeZonesGeoJson;
@@ -222,15 +296,25 @@ class _MapViewState extends State<MapView> {
         ),
         minZoom: 3,
         maxZoom: 18,
+        onTap: (TapPosition position, LatLng point) {
+          unawaited(_sampleAt(point));
+        },
       );
     } else {
-      options = const MapOptions(
-        initialCenter: LatLng(55.751244, 37.618423),
+      options = MapOptions(
+        initialCenter: const LatLng(55.751244, 37.618423),
         initialZoom: 10,
         minZoom: 3,
         maxZoom: 18,
+        onTap: (TapPosition position, LatLng point) {
+          unawaited(_sampleAt(point));
+        },
       );
     }
+    final LatLngBounds? previewBounds = _previewBounds;
+    final bool previewAvailable = previewBounds != null &&
+        _client != null &&
+        _hasScenes(_period);
     return Stack(
       children: <Widget>[
         FlutterMap(
@@ -242,13 +326,28 @@ class _MapViewState extends State<MapView> {
               userAgentPackageName: 'ru.glist.app',
               maxZoom: 19,
             ),
-            PolygonLayer(polygons: polygons),
+            if (previewAvailable && _showPreview)
+              OverlayImageLayer(
+                overlayImages: <OverlayImage>[
+                  OverlayImage(
+                    bounds: previewBounds,
+                    imageProvider: NetworkImage(
+                      _client!.previewUrl(widget.result.runId, _period),
+                    ),
+                    opacity: _previewOpacity,
+                  ),
+                ],
+              ),
+            if (_showPolygons) PolygonLayer(polygons: polygons),
           ],
         ),
         Positioned(top: 16, left: 16, child: _analysisChip()),
         Positioned(top: 16, right: 16, child: _zoomControls()),
+        Positioned(top: 64, right: 16, child: _dataControls()),
         Positioned(left: 16, bottom: 16, child: _legend()),
         Positioned(right: 16, bottom: 16, child: _statusBadge()),
+        if (_sample != null || _sampleError != null || _sampling)
+          Positioned(left: 16, bottom: 170, child: _sampleCard()),
       ],
     );
   }
@@ -310,6 +409,220 @@ class _MapViewState extends State<MapView> {
         ),
       ),
     );
+  }
+
+  Widget _dataControls() {
+    final Object? datesValue = widget.result.diagnostics['actualDates'];
+    final Map<String, dynamic> dates = datesValue is Map<String, dynamic>
+        ? datesValue
+        : <String, dynamic>{};
+    final String before = dates['start'] is List<dynamic>
+        ? (dates['start'] as List<dynamic>).whereType<String>().join(', ')
+        : '';
+    final String after = dates['end'] is List<dynamic>
+        ? (dates['end'] as List<dynamic>).whereType<String>().join(', ')
+        : '';
+    final bool hasStart = _hasScenes('start');
+    final bool hasEnd = _hasScenes('end');
+    return Container(
+      width: 230,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          const Text(
+            'Данные расчёта',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: AppColors.text,
+            ),
+          ),
+          const SizedBox(height: 2),
+          const Text(
+            'Снимки сцен расчёта, не подложка OSM',
+            style: TextStyle(fontSize: 10, color: AppColors.muted),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              ChoiceChip(
+                label: const Text('До', style: TextStyle(fontSize: 11)),
+                selected: _period == 'start',
+                onSelected: hasStart
+                    ? (_) => setState(() => _period = 'start')
+                    : null,
+              ),
+              const SizedBox(width: 6),
+              ChoiceChip(
+                label: const Text('После', style: TextStyle(fontSize: 11)),
+                selected: _period == 'end',
+                onSelected: hasEnd
+                    ? (_) => setState(() => _period = 'end')
+                    : null,
+              ),
+            ],
+          ),
+          _switchRow(
+            'Полигоны',
+            _showPolygons,
+            (bool value) => setState(() => _showPolygons = value),
+          ),
+          _switchRow(
+            'Снимок',
+            _showPreview,
+            (bool value) => setState(() => _showPreview = value),
+          ),
+          Row(
+            children: <Widget>[
+              const Text(
+                'Прозрачность',
+                style: TextStyle(fontSize: 11, color: AppColors.text),
+              ),
+              Expanded(
+                child: Slider(
+                  value: _previewOpacity,
+                  min: 0.1,
+                  max: 1,
+                  onChanged: (double value) =>
+                      setState(() => _previewOpacity = value),
+                ),
+              ),
+            ],
+          ),
+          if (before.isNotEmpty || after.isNotEmpty)
+            Text(
+              'Даты: до ${before.isEmpty ? '—' : before}; '
+              'после ${after.isEmpty ? '—' : after}.',
+              style: const TextStyle(fontSize: 10, color: AppColors.muted),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _switchRow(
+    String label,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) {
+    return SizedBox(
+      height: 32,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: <Widget>[
+          Text(
+            label,
+            style: const TextStyle(fontSize: 11, color: AppColors.text),
+          ),
+          Switch(
+            value: value,
+            onChanged: onChanged,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sampleCard() {
+    final Map<String, dynamic>? data = _sample;
+    final String? error = _sampleError;
+    return Container(
+      width: 260,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.1),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Expanded(
+                child: Text(
+                  'Значения в точке',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.text,
+                  ),
+                ),
+              ),
+              InkWell(
+                onTap: () => setState(() {
+                  _sample = null;
+                  _sampleError = null;
+                }),
+                child: const Icon(
+                  Icons.close,
+                  size: 16,
+                  color: AppColors.muted,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          if (_sampling) const LinearProgressIndicator(minHeight: 2),
+          if (error != null)
+            Text(
+              error,
+              style: const TextStyle(fontSize: 11, color: AppColors.lost),
+            ),
+          if (data != null) ...<Widget>[
+            Text(
+              'Класс: ${_transitionLabel(data['transition'])}',
+              style: const TextStyle(fontSize: 12, color: AppColors.text),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              'NDVI до: ${_formatNdvi(data['ndviBefore'])}; '
+              'после: ${_formatNdvi(data['ndviAfter'])}',
+              style: const TextStyle(fontSize: 11, color: AppColors.text),
+            ),
+            Text(
+              'Порог NDVI: ${_formatNdvi(data['ndviThreshold'])}',
+              style: const TextStyle(fontSize: 11, color: AppColors.muted),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _formatNdvi(Object? value) =>
+      value is num ? value.toStringAsFixed(3) : '—';
+
+  String _transitionLabel(Object? value) {
+    return switch (value) {
+      'retained' => 'сохранено (не изменение)',
+      'lost' => 'потеряно',
+      'new' => 'новые зоны',
+      'stable_non_vegetation' => 'без растительности',
+      _ => 'недостаточно данных',
+    };
   }
 
   Widget _legend() {

@@ -178,6 +178,9 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
             )
             run.attempt_count = max(0, min(1, attempt_no))
             run.finished_at = datetime.now(UTC)
+            query_record = await session.get(Query, run.query_id)
+            if query_record is not None:
+                query_record.status = run.status
             await session.commit()
 
         await publisher.publish(
@@ -207,6 +210,9 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
                     run.status = STATUS_ERROR
                     run.status_reason = (str(exc) or "Ошибка выполнения анализа")[:1000]
                     run.finished_at = datetime.now(UTC)
+                    query_record = await session.get(Query, run.query_id)
+                    if query_record is not None:
+                        query_record.status = run.status
                     await session.commit()
         except Exception:  # noqa: BLE001
             logger.exception("Не удалось записать статус ошибки run_id=%s", run_id)
@@ -245,12 +251,14 @@ async def _save_result(
         analysis.get("summary_text"),
         visualization.get("summary_text"),
         context.get("summary_text"),
-        f"Анализ завершён: обнаружено зон изменений — {len(change_zones)}.",
+        context.get("analysis_error"),
+        f"Анализ завершён: зон изменений — {len(change_zones)}.",
     )
     explanation_text = _first_text(
         analysis.get("explanation_text"),
         visualization.get("explanation_text"),
         context.get("text_explanation"),
+        context.get("analysis_error"),
         summary_text,
     )
 
@@ -266,7 +274,11 @@ async def _save_result(
     if isinstance(raw_sources, list):
         sources_summary = {"items": raw_sources}
     if not sources_summary:
-        sources_summary = {"datasets": _as_dict(context.get("datasets"))}
+        sources_summary = {}
+    diagnostics = _as_dict(context.get("analysis_diagnostics"))
+    if diagnostics:
+        sources_summary["diagnostics"] = diagnostics
+    sources_summary.setdefault("datasets", _as_dict(context.get("datasets")))
 
     mode = str(analysis.get("mode") or "single")
     if mode not in ("single", "combined"):

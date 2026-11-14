@@ -30,40 +30,37 @@ def classify_vegetation(ndvi: np.ndarray, threshold: float = 0.3) -> np.ndarray:
 def detect_changes(
     classification_start: np.ndarray,
     classification_end: np.ndarray,
+    valid_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compare two vegetation classifications to detect changes.
 
-    (Alias/wrapper for API compatibility with test imports.)
-
-    Computes three change zones:
-    - retained: was vegetation (1) and still vegetation (1)
-    - lost: was vegetation (1) and became non-vegetation (0)
-    - new: was non-vegetation (0) and became vegetation (1)
-
     Args:
-        classification_start: Binary classification from start period (1=veg, 0=no veg).
-        classification_end: Binary classification from end period (1=veg, 0=no veg).
+        classification_start: Binary classification from start period.
+        classification_end: Binary classification from end period.
+        valid_mask: Общее валидное покрытие (True = обе даты валидны).
+            Невалидные пиксели не попадают ни в один класс изменений.
 
     Returns:
         Tuple of (retained, lost, new) binary arrays.
     """
-    return compare_classifications(classification_start, classification_end)
+    return compare_classifications(classification_start, classification_end, valid_mask)
 
 
 def compare_classifications(
     classification_start: np.ndarray,
     classification_end: np.ndarray,
+    valid_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Compare two vegetation classifications to detect changes.
 
-    Computes three change zones:
-    - retained: was vegetation (1) and still vegetation (1)
-    - lost: was vegetation (1) and became non-vegetation (0)
-    - new: was non-vegetation (0) and became vegetation (1)
+    Вычисления выполняются только на общем валидном покрытии: пиксели,
+    невалидные хотя бы на одной дате (облака, тени, снег, NoData), не
+    считаются ни потерей, ни появлением растительности.
 
     Args:
         classification_start: Binary classification from start period (1=veg, 0=no veg).
         classification_end: Binary classification from end period (1=veg, 0=no veg).
+        valid_mask: Boolean mask of shared-valid pixels; None = все пиксели валидны.
 
     Returns:
         Tuple of (retained, lost, new) binary arrays.
@@ -80,6 +77,12 @@ def compare_classifications(
 
     # new: 0 -> 1 (new vegetation appeared)
     new = ((start == 0) & (end == 1)).astype(bool)
+
+    if valid_mask is not None:
+        valid = valid_mask.astype(bool)
+        retained = retained & valid
+        lost = lost & valid
+        new = new & valid
 
     return retained, lost, new
 

@@ -141,14 +141,21 @@ class _ResultScreenState extends State<ResultScreen> {
 
   Widget _buildPanel(BuildContext context, AnalysisResult result) {
     final TextTheme textTheme = Theme.of(context).textTheme;
-    final double retained = result.aggregate.retained.areaKm2;
-    final double lost = result.aggregate.lost.areaKm2;
-    final double newZones = result.aggregate.newZones.areaKm2;
-    final double total = retained + lost + newZones;
-    final double net = total > 0 ? (newZones - lost) / total * 100 : 0;
-    final String netLabel =
-        '${net >= 0 ? '+' : ''}${net.toStringAsFixed(0)}%';
-    final Color netColor = net < 0 ? AppColors.lost : AppColors.retained;
+    final ChangeClassStats retained = result.aggregate.retained;
+    final ChangeClassStats lost = result.aggregate.lost;
+    final ChangeClassStats newZones = result.aggregate.newZones;
+    final double total = retained.areaKm2 + lost.areaKm2 + newZones.areaKm2;
+    final double? net = total > 0
+        ? (newZones.areaKm2 - lost.areaKm2) / total * 100
+        : null;
+    final String netLabel = net == null
+        ? '—'
+        : '${net >= 0 ? '+' : ''}${_formatPercent(net)}%';
+    final Color netColor = net == null
+        ? AppColors.muted
+        : net < 0
+            ? AppColors.lost
+            : AppColors.retained;
     final String explanation = result.explanationText.isNotEmpty
         ? result.explanationText
         : result.summaryText.isNotEmpty
@@ -220,8 +227,15 @@ class _ResultScreenState extends State<ResultScreen> {
             const Divider(height: 1, color: AppColors.border),
             const SizedBox(height: 16),
             _statRow(AppColors.lost, 'Потеряно', lost),
-            _statRow(AppColors.retained, 'Сохранено', retained),
+            _statRow(AppColors.retained, 'Сохранено (не изменение)', retained),
             _statRow(AppColors.newZone, 'Новые зоны', newZones),
+            const SizedBox(height: 8),
+            const Text(
+              'Процент изменения = (новые − потерянные) / сумма площадей × 100%.',
+              style: TextStyle(fontSize: 12, color: AppColors.muted),
+            ),
+            const SizedBox(height: 16),
+            _qualityBox(result),
             const SizedBox(height: 20),
             _infoBox(explanation),
             if (result.rejections.isNotEmpty) ...<Widget>[
@@ -266,7 +280,27 @@ class _ResultScreenState extends State<ResultScreen> {
     );
   }
 
-  Widget _statRow(Color color, String label, double areaKm2) {
+  String _formatPercent(double value) {
+    final String text = value.abs() < 10
+        ? value.toStringAsFixed(1)
+        : value.toStringAsFixed(0);
+    return text == '-0.0' ? '0.0' : text;
+  }
+
+  String _formatArea(double areaKm2) {
+    if (areaKm2 == 0) {
+      return '0';
+    }
+    if (areaKm2.abs() < 0.01) {
+      return '${(areaKm2 * 1000000).round()} м²';
+    }
+    if (areaKm2.abs() < 1) {
+      return '${areaKm2.toStringAsFixed(4)} км²';
+    }
+    return '${areaKm2.toStringAsFixed(2)} км²';
+  }
+
+  Widget _statRow(Color color, String label, ChangeClassStats stats) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -286,13 +320,109 @@ class _ResultScreenState extends State<ResultScreen> {
               style: const TextStyle(fontSize: 14, color: AppColors.text),
             ),
           ),
-          Text(
-            '${areaKm2.toStringAsFixed(1)} км²',
-            style: const TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
-              color: AppColors.text,
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: <Widget>[
+              Text(
+                _formatArea(stats.areaKm2),
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.text,
+                ),
+              ),
+              Text(
+                '${stats.zonesCount} полиг.',
+                style: const TextStyle(fontSize: 11, color: AppColors.muted),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _qualityBox(AnalysisResult result) {
+    final double? shared = result.sharedCoverage;
+    final Map<String, dynamic> dates =
+        JsonUtils.asMap(result.diagnostics['actualDates']);
+    final String before = JsonUtils.asList(dates['start'])
+        .whereType<String>()
+        .join(', ');
+    final String after = JsonUtils.asList(dates['end'])
+        .whereType<String>()
+        .join(', ');
+    final List<String> limitations = result.qualityLimitations;
+    if (shared == null && before.isEmpty && after.isEmpty && limitations.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: limitations.isEmpty
+            ? AppColors.accentSoft
+            : AppColors.warningBg,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(
+                limitations.isEmpty
+                    ? Icons.verified_outlined
+                    : Icons.info_outline,
+                size: 16,
+                color: limitations.isEmpty
+                    ? AppColors.primary
+                    : AppColors.warningText,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Достоверность данных',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: limitations.isEmpty
+                      ? AppColors.primary
+                      : AppColors.warningText,
+                ),
+              ),
+            ],
+          ),
+          if (shared != null) ...<Widget>[
+            const SizedBox(height: 6),
+            Text(
+              'Общее валидное покрытие обеих дат: '
+              '${(shared * 100).toStringAsFixed(1)}%',
+              style: const TextStyle(fontSize: 12, color: AppColors.text),
             ),
+          ],
+          if (before.isNotEmpty || after.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(
+              'Фактические даты: до ${before.isEmpty ? '—' : before}; '
+              'после ${after.isEmpty ? '—' : after}.',
+              style: const TextStyle(fontSize: 12, color: AppColors.text),
+            ),
+          ],
+          for (final String limitation in limitations)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                '• $limitation',
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: AppColors.warningText,
+                ),
+              ),
+            ),
+          const SizedBox(height: 4),
+          const Text(
+            'Классы рассчитываются только на общем валидном покрытии: '
+            'облака, тени, снег и NoData не считаются изменением.',
+            style: TextStyle(fontSize: 11, color: AppColors.muted),
           ),
         ],
       ),

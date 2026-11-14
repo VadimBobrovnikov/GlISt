@@ -273,6 +273,8 @@ def _search_sentinel2_scenes_sync(
         scl_url = _asset_href(item, "scl", "SCL")
         if not (red_url and nir_url and scl_url):
             continue
+        green_url = _asset_href(item, "green", "B03", "b03")
+        blue_url = _asset_href(item, "blue", "B02", "b02")
 
         properties = item.get("properties", {})
         if not isinstance(properties, dict):
@@ -297,6 +299,8 @@ def _search_sentinel2_scenes_sync(
                 "red_url": red_url,
                 "nir_url": nir_url,
                 "scl_url": scl_url,
+                "green_url": green_url,
+                "blue_url": blue_url,
             }
         )
         if len(scenes) >= limit:

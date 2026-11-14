@@ -199,6 +199,10 @@ class AnalysisResult {
     this.areasPurged = false,
     this.territories = const <ResultTerritory>[],
     this.aggregate = const AnalysisAggregate(),
+    this.bbox,
+    this.coverage = const <String, dynamic>{},
+    this.diagnostics = const <String, dynamic>{},
+    this.qualityLimitations = const <String>[],
     this.createdAt,
   });
 
@@ -247,8 +251,26 @@ class AnalysisResult {
   /// Суммарная статистика по территориям.
   final AnalysisAggregate aggregate;
 
+  /// Область анализа [west, south, east, north].
+  final List<double>? bbox;
+
+  /// Валидное покрытие дат (`validStart`, `validEnd`, `sharedValid`, `unknown`).
+  final Map<String, dynamic> coverage;
+
+  /// Диагностика запуска (сцены, фактические даты, порог, сезоны).
+  final Map<String, dynamic> diagnostics;
+
+  /// Ограничения качества данных.
+  final List<String> qualityLimitations;
+
   /// Время создания результата.
   final DateTime? createdAt;
+
+  /// Доля общего валидного покрытия (0…1).
+  double? get sharedCoverage {
+    final Object? value = coverage['sharedValid'];
+    return value is num ? value.toDouble() : null;
+  }
 
   /// Создаёт модель из JSON-объекта контракта.
   factory AnalysisResult.fromJson(Map<String, dynamic> json) {
@@ -276,7 +298,25 @@ class AnalysisResult {
           .map(ResultTerritory.fromJson)
           .toList(growable: false),
       aggregate: AnalysisAggregate.fromJson(JsonUtils.asMap(json['aggregate'])),
+      bbox: _bboxFromJson(json['bbox']),
+      coverage: JsonUtils.asMap(json['coverage']),
+      diagnostics: JsonUtils.asMap(json['diagnostics']),
+      qualityLimitations: JsonUtils.asStringList(json['qualityLimitations']),
       createdAt: JsonUtils.asDateTime(json['createdAt']),
     );
   }
+}
+
+List<double>? _bboxFromJson(Object? value) {
+  if (value is! List<dynamic> || value.length != 4) {
+    return null;
+  }
+  final List<double> result = <double>[];
+  for (final Object? item in value) {
+    if (item is! num) {
+      return null;
+    }
+    result.add(item.toDouble());
+  }
+  return result;
 }

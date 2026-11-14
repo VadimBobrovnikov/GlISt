@@ -1,20 +1,39 @@
+import 'dart:typed_data';
+
 import 'package:dio/dio.dart';
 
 import '../shared/models/models.dart';
 
+/// Скачанный файл артефакта.
+class DownloadedFile {
+  const DownloadedFile({
+    required this.bytes,
+    required this.filename,
+    required this.mimeType,
+  });
+
+  final Uint8List bytes;
+  final String filename;
+  final String mimeType;
+}
+
 /// HTTP-клиент GlISt API на пакете `dio`.
 ///
-/// Базовый URL по умолчанию — локальный стенд `http://localhost:8000`.
-/// Ответы 4xx/5xx преобразуются в [ApiException]; специальные коды
-/// 409 (результат не готов) и 410 (артефакт удалён) распознаются через
-/// [ApiException.isConflict] и [ApiException.isGone].
+/// Базовый URL задаётся `--dart-define=API_BASE_URL=...`; по умолчанию —
+/// локальный стенд `http://localhost:8000`.
 class ApiClient {
+  /// Базовый URL API из окружения сборки.
+  static const String _defaultBaseUrl = String.fromEnvironment(
+    'API_BASE_URL',
+    defaultValue: 'http://localhost:8000',
+  );
+
   /// Создаёт клиент; можно передать готовый [Dio] (например, в тестах).
-  ApiClient({Dio? dio, String baseUrl = 'http://localhost:8000'})
+  ApiClient({Dio? dio, String? baseUrl})
       : _dio = dio ??
             Dio(
               BaseOptions(
-                baseUrl: baseUrl,
+                baseUrl: baseUrl ?? _defaultBaseUrl,
                 connectTimeout: const Duration(seconds: 10),
                 sendTimeout: const Duration(seconds: 30),
                 receiveTimeout: const Duration(seconds: 30),
@@ -97,9 +116,76 @@ class ApiClient {
     return Artifact.fromJson(JsonUtils.asMap(response.data));
   }
 
+  /// Абсолютный URL по пути API (без жёсткого localhost).
+  String absoluteUrl(String path) {
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return path;
+    }
+    final String base = _dio.options.baseUrl.replaceAll(RegExp(r'/+$'), '');
+    final String suffix = path.startsWith('/') ? path : '/$path';
+    return '$base$suffix';
+  }
+
+  /// URL RGB-композита до/после из сцен, участвовавших в расчёте.
+  String previewUrl(String runId, String period) =>
+      absoluteUrl('/api/v1/runs/$runId/preview?period=$period');
+
+  /// NDVI до/после и класс перехода для точки.
+  Future<Map<String, dynamic>> sampleRun(
+    String runId,
+    double lat,
+    double lon,
+  ) async {
+    final Response<dynamic> response = await _send(
+      () => _dio.get<dynamic>(
+        '/api/v1/runs/$runId/sample',
+        queryParameters: <String, dynamic>{'lat': lat, 'lon': lon},
+      ),
+    );
+    return JsonUtils.asMap(response.data);
+  }
+
+  /// Скачивает содержимое артефакта (Content-Disposition → имя файла).
+  Future<DownloadedFile> downloadArtifact(String contentUrl) async {
+    final Response<List<int>> response = await _send(
+      () => _dio.get<List<int>>(
+        contentUrl,
+        options: Options(
+          responseType: ResponseType.bytes,
+          receiveTimeout: const Duration(seconds: 60),
+          followRedirects: true,
+        ),
+      ),
+    );
+    final List<int> bytes = response.data ?? <int>[];
+    final String? disposition =
+        response.headers.value('content-disposition');
+    final String? contentType = response.headers.value('content-type');
+    return DownloadedFile(
+      bytes: Uint8List.fromList(bytes),
+      filename:
+          _filenameFromDisposition(disposition) ?? 'glist-export.bin',
+      mimeType: contentType ?? 'application/octet-stream',
+    );
+  }
+
+  String? _filenameFromDisposition(String? disposition) {
+    if (disposition == null) {
+      return null;
+    }
+    final RegExpMatch? match =
+        RegExp(r'filename="?([^";]+)"?', caseSensitive: false)
+            .firstMatch(disposition);
+    final String? raw = match?.group(1);
+    if (raw == null || raw.trim().isEmpty) {
+      return null;
+    }
+    return Uri.decodeComponent(raw.trim().replaceAll('"', ''));
+  }
+
   /// Выполняет запрос и приводит ошибки `dio` к [ApiException].
-  Future<Response<dynamic>> _send(
-    Future<Response<dynamic>> Function() request,
+  Future<Response<T>> _send<T>(
+    Future<Response<T>> Function() request,
   ) async {
     try {
       return await request();

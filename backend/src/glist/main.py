@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from glist.api import exports, health, queries, runs, ws
+from glist.api import exports, health, previews, queries, runs, ws
 
 app = FastAPI(
     title="GlISt — геопространственная мультиагентная платформа",
@@ -32,6 +32,7 @@ app.include_router(ws.router)
 app.include_router(queries.router)
 app.include_router(runs.router)
 app.include_router(exports.router)
+app.include_router(previews.router)
 
 
 @app.exception_handler(Exception)

@@ -33,6 +33,8 @@ def _feature(
 ) -> dict[str, Any]:
     assets: dict[str, Any] = {
         "red": {"href": "https://example.com/B04.tif"},
+        "green": {"href": "https://example.com/B03.tif"},
+        "blue": {"href": "https://example.com/B02.tif"},
         "nir": {"href": "https://example.com/B08.tif"},
     }
     if with_scl:
@@ -73,6 +75,8 @@ async def test_search_returns_cog_urls_for_red_nir_scl() -> None:
             "red_url": "https://example.com/B04.tif",
             "nir_url": "https://example.com/B08.tif",
             "scl_url": "https://example.com/SCL.tif",
+            "green_url": "https://example.com/B03.tif",
+            "blue_url": "https://example.com/B02.tif",
         }
     ]
     args, kwargs = get_mock.call_args

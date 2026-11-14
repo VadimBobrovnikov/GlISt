@@ -200,18 +200,25 @@ async def list_queries(  # noqa: B008
         .limit(limit)
     )
     items = result.scalars().all()
-    return {
-        "items": [
+    history: list[dict[str, Any]] = []
+    for query in items:
+        run_result = await session.execute(
+            select(AnalysisRun)
+            .where(AnalysisRun.query_id == query.id)  # type: ignore[arg-type]
+            .order_by(desc(AnalysisRun.created_at))  # type: ignore[arg-type]
+            .limit(1)
+        )
+        last_run = run_result.scalar_one_or_none()
+        history.append(
             {
-                "id": q.id,
-                "text": q.text,
-                "status": q.status,
-                "createdAt": q.created_at,
-                "lastRunId": None,
+                "id": query.id,
+                "text": query.text,
+                "status": last_run.status if last_run is not None else query.status,
+                "createdAt": query.created_at,
+                "lastRunId": last_run.id if last_run is not None else None,
             }
-            for q in items
-        ]
-    }
+        )
+    return {"items": history}
 
 
 @router.get("/queries/{queryId}", tags=["queries"])
@@ -231,9 +238,17 @@ async def get_query(  # noqa: B008
     query = result.scalar_one_or_none()
     if query is None:
         raise HTTPException(status_code=404, detail="Запрос не найден")
+    run_result = await session.execute(
+        select(AnalysisRun)
+        .where(AnalysisRun.query_id == query.id)  # type: ignore[arg-type]
+        .order_by(desc(AnalysisRun.created_at))  # type: ignore[arg-type]
+        .limit(1)
+    )
+    last_run = run_result.scalar_one_or_none()
     return {
         "id": query.id,
         "text": query.text,
-        "status": query.status,
+        "status": last_run.status if last_run is not None else query.status,
         "createdAt": query.created_at,
+        "lastRunId": last_run.id if last_run is not None else None,
     }

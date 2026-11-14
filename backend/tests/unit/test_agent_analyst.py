@@ -125,6 +125,10 @@ async def test_analyst_builds_real_change_zones(
     )
     assert context["datasets"]["accepted"]
     assert context["analysis_type"] == "vegetation_change"
+    diagnostics = context["analysis_diagnostics"]
+    assert diagnostics["coverage"]["sharedValid"] == pytest.approx(1.0)
+    assert diagnostics["sceneOverlap"]["startEndDisjoint"] is True
+    assert diagnostics["classification"]["ndviThreshold"] == pytest.approx(0.25)
 
 
 @pytest.mark.asyncio

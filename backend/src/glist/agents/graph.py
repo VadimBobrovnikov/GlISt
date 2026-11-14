@@ -47,11 +47,11 @@ def build_graph() -> Any:
     workflow = StateGraph(AgentState)
 
     # Add all nodes
-    workflow.add_node("researcher", researcher_node)
-    workflow.add_node("analyst", analyst_node)
-    workflow.add_node("visualizer", visualizer_node)
-    workflow.add_node("validator", validator_node)
-    workflow.add_node("finalize", finalize_node)
+    workflow.add_node("researcher", researcher_node)  # type: ignore[type-var]
+    workflow.add_node("analyst", analyst_node)  # type: ignore[type-var]
+    workflow.add_node("visualizer", visualizer_node)  # type: ignore[type-var]
+    workflow.add_node("validator", validator_node)  # type: ignore[type-var]
+    workflow.add_node("finalize", finalize_node)  # type: ignore[type-var]
 
     # Add edges
     workflow.set_entry_point("researcher")

@@ -20,24 +20,25 @@ async def validator_node(state: dict[str, Any]) -> dict[str, Any]:
         Partial state update with validation outcome and next_agent.
     """
     context: dict[str, Any] = state.get("context", {})
-    change_zones: list = context.get("change_zones", [])
+    change_zones: list[dict[str, Any]] = context.get("change_zones", [])
     attempt_no: int = state.get("attempt_count", 0)
 
     if not change_zones:
+        sufficient = bool(context.get("analysis_sufficient"))
         return {
             "validation": {
-                "outcome": "failed",
-                "category": "data_quality",
+                "outcome": "passed" if sufficient else "failed",
+                "category": "analysis_error" if sufficient else "data_quality",
                 "attempt_no": attempt_no,
-                "reasons": ["No change zones detected"],
+                "reasons": [] if sufficient else ["No change zones detected"],
                 "fixes_applied": [],
             },
             "next_agent": "finalize",
         }
 
     # Validate change zones - check required fields
-    validation_errors: list = []
-    valid_classes: set = {"retained", "lost", "new"}
+    validation_errors: list[str] = []
+    valid_classes: set[str] = {"retained", "lost", "new"}
 
     for i, zone in enumerate(change_zones):
         if isinstance(zone, dict):

@@ -6,6 +6,7 @@ import '../../core/api_client.dart';
 import '../../core/api_provider.dart';
 import '../../core/app_theme.dart';
 import '../../shared/models/models.dart';
+import '../history/history_view.dart';
 import '../progress/progress_view.dart';
 
 /// Экран ввода запроса на естественном языке (T067).
@@ -105,7 +106,24 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: <Widget>[
-                  const _BrandHeader(),
+                  Row(
+                    children: <Widget>[
+                      const Expanded(child: _BrandHeader()),
+                      TextButton.icon(
+                        onPressed: () {
+                          unawaited(
+                            Navigator.of(context).push(
+                              MaterialPageRoute<void>(
+                                builder: (_) => const HistoryScreen(),
+                              ),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.history, size: 18),
+                        label: const Text('История'),
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 32),
                   Text(
                     'Узнайте как.',

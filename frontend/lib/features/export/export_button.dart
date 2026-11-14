@@ -1,6 +1,8 @@
 import 'dart:async';
+import 'dart:js_interop';
 
 import 'package:flutter/material.dart';
+import 'package:web/web.dart' as web;
 
 import '../../core/api_client.dart';
 import '../../core/api_provider.dart';
@@ -44,11 +46,14 @@ class _ExportButtonState extends State<ExportButton> {
     try {
       final Artifact artifact =
           await client.createExport(widget.runId, widget.format);
+      final DownloadedFile file =
+          await client.downloadArtifact(artifact.contentUrl);
       if (!mounted) {
         return;
       }
+      _triggerDownload(file);
       messenger.showSnackBar(
-        SnackBar(content: Text('Экспорт готов: ${artifact.contentUrl}')),
+        SnackBar(content: Text('Файл скачан: ${file.filename}')),
       );
     } on ApiException catch (error) {
       if (!mounted) {
@@ -65,6 +70,22 @@ class _ExportButtonState extends State<ExportButton> {
         });
       }
     }
+  }
+
+  void _triggerDownload(DownloadedFile file) {
+    final web.Blob blob = web.Blob(
+      <JSAny>[file.bytes.toJS].toJS,
+      web.BlobPropertyBag(type: file.mimeType),
+    );
+    final String url = web.URL.createObjectURL(blob);
+    final web.HTMLAnchorElement anchor = web.HTMLAnchorElement()
+      ..href = url
+      ..download = file.filename
+      ..style.display = 'none';
+    web.document.body?.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    web.URL.revokeObjectURL(url);
   }
 
   @override

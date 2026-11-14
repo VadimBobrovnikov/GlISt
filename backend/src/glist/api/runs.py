@@ -71,6 +71,10 @@ class AnalysisResultSchema(BaseModel):
     validationOutcome: str = "passed"
     territories: list[dict[str, Any]] = []
     aggregate: dict[str, Any] = {}
+    bbox: list[float] | None = None
+    coverage: dict[str, Any] = {}
+    diagnostics: dict[str, Any] = {}
+    qualityLimitations: list[str] = []
     createdAt: Any = None
 
 
@@ -292,6 +296,27 @@ async def get_run_result(  # noqa: B008
         if isinstance(analysis_result.total_area_km2, dict)
         else {}
     )
+    raw_diagnostics = sources_summary.get("diagnostics")
+    diagnostics: dict[str, Any] = {}
+    if isinstance(raw_diagnostics, dict):
+        diagnostics = {str(key): value for key, value in raw_diagnostics.items()}
+    raw_bbox = diagnostics.get("bbox")
+    bbox = (
+        [float(value) for value in raw_bbox]
+        if isinstance(raw_bbox, list) and len(raw_bbox) == 4
+        else None
+    )
+    coverage = (
+        diagnostics.get("coverage")
+        if isinstance(diagnostics.get("coverage"), dict)
+        else {}
+    )
+    raw_limitations = diagnostics.get("limitations")
+    quality_limitations = (
+        [str(item) for item in raw_limitations]
+        if isinstance(raw_limitations, list)
+        else []
+    )
     aggregate = {
         "retained": aggregate_stats["retained"],
         "lost": aggregate_stats["lost"],
@@ -318,5 +343,9 @@ async def get_run_result(  # noqa: B008
         validationOutcome=analysis_result.validation_outcome,
         territories=territories,
         aggregate=aggregate,
+        bbox=bbox,
+        coverage=coverage,
+        diagnostics=diagnostics,
+        qualityLimitations=quality_limitations,
         createdAt=analysis_result.created_at,
     )

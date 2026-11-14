@@ -37,9 +37,24 @@ EXPANDED_WINDOW_DAYS = 60
 REFLECTANCE_SCALE = 0.0001
 SCL_SCALE = 1.0
 MAX_BBOX_SPAN_DEG = 0.12
+MIN_VALID_COVERAGE = 0.1
 _BAND_READ_CONCURRENCY = 4
 _COMPOSITE_TIMEOUT_SECONDS = 180.0
 _CHANGE_CLASSES = ("retained", "lost", "new")
+_SEASON_BY_MONTH = {
+    12: "зима",
+    1: "зима",
+    2: "зима",
+    3: "весна",
+    4: "весна",
+    5: "весна",
+    6: "лето",
+    7: "лето",
+    8: "лето",
+    9: "осень",
+    10: "осень",
+    11: "осень",
+}
 # Резервные bbox для известных городов на случай недоступности Nominatim.
 _STATIC_BBOXES: dict[str, list[float]] = {
     "москва": [37.35, 55.55, 37.95, 55.95],
@@ -68,6 +83,24 @@ def _window(center: date, days: int) -> tuple[str, str]:
         (center - timedelta(days=days)).isoformat(),
         (center + timedelta(days=days)).isoformat(),
     )
+
+
+def _season_for(value: object) -> str | None:
+    """Сезон даты сцены (для проверки сопоставимости)."""
+    parsed = _parse_date(value)
+    if parsed is None:
+        return None
+    return _SEASON_BY_MONTH.get(parsed.month)
+
+
+def _actual_dates(items: list[dict[str, Any]]) -> list[str]:
+    """Фактические даты использованных сцен (YYYY-MM-DD)."""
+    dates: list[str] = []
+    for item in items:
+        value = item.get("datetime")
+        if isinstance(value, str) and value[:10] not in dates:
+            dates.append(value[:10])
+    return sorted(dates)
 
 
 def _limit_bbox(bbox: list[float]) -> list[float]:
@@ -164,7 +197,7 @@ async def _search_period(
 
 
 def _scene_meta(scene: dict[str, Any]) -> dict[str, Any]:
-    """Метаданные сцены для datasets/accepted."""
+    """Метаданные сцены для datasets/accepted и диагностики."""
     return {
         "source": "Sentinel-2",
         "collection": "sentinel-2-l2a",
@@ -173,6 +206,11 @@ def _scene_meta(scene: dict[str, Any]) -> dict[str, Any]:
         "cloudCover": scene.get("cloud_cover"),
         "role": scene.get("role"),
         "projEpsg": scene.get("proj_epsg"),
+        "redUrl": scene.get("red_url"),
+        "greenUrl": scene.get("green_url"),
+        "blueUrl": scene.get("blue_url"),
+        "nirUrl": scene.get("nir_url"),
+        "sclUrl": scene.get("scl_url"),
     }
 
 
@@ -249,9 +287,99 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
     start_ndvi = start_ndvi[:rows, :cols]
     end_ndvi = end_ndvi[:rows, :cols]
 
+    valid_start = ~np.isnan(start_ndvi)
+    valid_end = ~np.isnan(end_ndvi)
+    shared_valid = valid_start & valid_end
+    total_pixels = int(shared_valid.size)
+    coverage = {
+        "validStart": float(valid_start.mean()) if total_pixels else 0.0,
+        "validEnd": float(valid_end.mean()) if total_pixels else 0.0,
+        "sharedValid": float(shared_valid.mean()) if total_pixels else 0.0,
+        "unknown": float((~shared_valid).mean()) if total_pixels else 1.0,
+        "totalPixels": total_pixels,
+    }
+    actual_dates = {
+        "start": _actual_dates(start_ok),
+        "end": _actual_dates(end_ok),
+    }
+    start_scene_ids = [item.get("sceneId") for item in start_ok]
+    end_scene_ids = [item.get("sceneId") for item in end_ok]
+    shared_scene_ids = sorted(
+        {str(item) for item in start_scene_ids if item}
+        & {str(item) for item in end_scene_ids if item}
+    )
+    seasons = {
+        "start": _season_for(start_ok[0].get("datetime")) if start_ok else None,
+        "end": _season_for(end_ok[0].get("datetime")) if end_ok else None,
+    }
+    season_comparable = (
+        seasons["start"] is not None and seasons["start"] == seasons["end"]
+    )
+    limitations: list[str] = []
+    if not season_comparable:
+        limitations.append(
+            "Сезоны дат различаются "
+            f"({seasons['start'] or '—'} и {seasons['end'] or '—'}): "
+            "возможны сезонные изменения растительности."
+        )
+    if coverage["sharedValid"] < 0.5:
+        limitations.append(
+            "Общее валидное покрытие "
+            f"{coverage['sharedValid'] * 100:.1f}%: результат может быть неполным."
+        )
+    diagnostics: dict[str, Any] = {
+        "bbox": bbox,
+        "requestedPeriod": {
+            "start": start_date.isoformat(),
+            "end": end_date.isoformat(),
+        },
+        "actualDates": actual_dates,
+        "sceneIds": {
+            "start": start_scene_ids,
+            "end": end_scene_ids,
+        },
+        "sceneOverlap": {
+            "sharedSceneIds": shared_scene_ids,
+            "startEndDisjoint": not shared_scene_ids,
+        },
+        "scenes": {"start": start_ok, "end": end_ok},
+        "channels": {
+            "red": "B04",
+            "green": "B03",
+            "blue": "B02",
+            "nir": "B08",
+            "scl": "SCL",
+        },
+        "classification": {
+            "ndviThreshold": threshold,
+            "minAreaM2": min_area_m2,
+            "ndviFormula": "(B08 - B04) / (B08 + B04)",
+        },
+        "coverage": coverage,
+        "seasons": {**seasons, "comparable": season_comparable},
+        "transitionRule": (
+            "retained: veg&veg; lost: veg&!veg; new: !veg&veg; "
+            "unknown: невалидно хотя бы на одной дате"
+        ),
+        "limitations": limitations,
+    }
+
+    if coverage["sharedValid"] < MIN_VALID_COVERAGE:
+        return _fail(
+            context,
+            "Недостаточное общее валидное покрытие "
+            f"({coverage['sharedValid'] * 100:.1f}%) — изменения не рассчитываются",
+            datasets,
+            diagnostics,
+        )
+
     start_class = classify_vegetation(start_ndvi, threshold)
     end_class = classify_vegetation(end_ndvi, threshold)
-    retained, lost, new = detect_changes(start_class, end_class)
+    retained, lost, new = detect_changes(
+        start_class,
+        end_class,
+        valid_mask=shared_valid,
+    )
     zones = build_change_zones(
         {"retained": retained, "lost": lost, "new": new},
         start_transform,
@@ -260,11 +388,32 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
         min_area_m2,
     )
     if not zones:
-        return _fail(
-            context,
-            "Зоны изменений не обнаружены после фильтра 1000 м²",
-            datasets,
+        context.update(
+            {
+                "change_zones": [],
+                "analysis_diagnostics": diagnostics,
+                "analysis_sufficient": True,
+                "datasets": datasets,
+                "coverage": coverage,
+                "aggregate": {
+                    "has_overlap": False,
+                    "note": "сумма по территориям (с возможным пересечением)",
+                    "zonesCount": 0,
+                    "retained": {"zonesCount": 0},
+                    "lost": {"zonesCount": 0},
+                    "new": {"zonesCount": 0},
+                },
+                "analysis_type": analysis_type,
+                "ndvi_threshold": threshold,
+                "min_area_m2": min_area_m2,
+                "bbox": bbox,
+            }
         )
+        return {
+            "context": context,
+            "next_agent": "visualizer",
+            "messages": ["Analyst: зоны изменений не обнаружены"],
+        }
 
     counts = {
         change_class: sum(
@@ -275,6 +424,8 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
     context.update(
         {
             "change_zones": zones,
+            "analysis_diagnostics": diagnostics,
+            "analysis_sufficient": True,
             "raster_refs": [
                 {
                     "kind": "start_period",
@@ -298,6 +449,7 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
             "ndvi_threshold": threshold,
             "min_area_m2": min_area_m2,
             "bbox": bbox,
+            "coverage": coverage,
         }
     )
     return {
@@ -425,11 +577,16 @@ def _fail(
     context: dict[str, Any],
     message: str,
     datasets: dict[str, Any] | None = None,
+    diagnostics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Возвращает управление Validator с понятной причиной и без зон."""
     context["change_zones"] = []
     if datasets is not None:
         context["datasets"] = datasets
+    if diagnostics is not None:
+        context["analysis_diagnostics"] = diagnostics
+        context["coverage"] = diagnostics.get("coverage")
+        context["analysis_sufficient"] = False
     context["analysis_error"] = message
     logger.warning("Analyst: %s", message)
     return {
