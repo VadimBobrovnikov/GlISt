@@ -273,6 +273,9 @@ def _search_sentinel2_scenes_sync(
         ),
         "limit": min(max(limit, 5), 20),
         "query": json.dumps({"eo:cloud_cover": {"lt": max_cloud_cover}}),
+        # Без сортировки Earth Search отдаёт последние сцены, и ясные
+        # более ранние (например, сентябрьские) теряются из-за limit.
+        "sortby": "+properties.eo:cloud_cover",
     }
     headers = {
         "User-Agent": os.environ.get("OSM_USER_AGENT", "GlISt/0.1"),

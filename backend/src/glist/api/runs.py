@@ -148,10 +148,17 @@ async def get_run(  # noqa: B008
 @router.get("/runs/{runId}/zones", tags=["runs"])
 async def get_run_zones(  # noqa: B008
     runId: uuid.UUID,
+    dissolve: bool = False,
+    limit: int = 300,
     session: AsyncSession = Depends(get_session),  # noqa: B008
     current_user: dict[str, Any] = Depends(get_current_user),  # noqa: B008
 ) -> dict[str, Any]:
-    """GeoJSON зон изменений (упрощённая геометрия) для карты."""
+    """GeoJSON зон изменений для карты.
+
+    По умолчанию отдаёт ``limit`` крупнейших зон: объединение десятков тысяч
+    полигонов через ST_Union слишком тяжёлое. Статистика в ``/result``
+    считается по всем зонам.
+    """
     run = await session.get(AnalysisRun, runId)
     if run is None:
         raise HTTPException(status_code=404, detail="Запуск не найден")
@@ -165,44 +172,125 @@ async def get_run_zones(  # noqa: B008
     if result_row is None:
         raise HTTPException(status_code=409, detail="Результат ещё не готов")
 
-    rows = (
-        await session.execute(
-            select(  # type: ignore[call-overload]
-                ResultTerritory.territory_name,
-                ChangeZone.change_class,
-                ChangeZone.area_km2,
-                func.ST_AsGeoJSON(
-                    func.ST_SimplifyPreserveTopology(ChangeZone.geom, 0.00005)
-                ).label("geojson"),
+    total_zones = int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(ChangeZone)
+                .join(
+                    ResultTerritory,
+                    ResultTerritory.id == ChangeZone.result_territory_id,  # type: ignore[arg-type]
+                )
+                .where(ResultTerritory.result_id == result_row.id)  # type: ignore[arg-type]
             )
-            .join(
-                ResultTerritory,
-                ResultTerritory.id == ChangeZone.result_territory_id,
-            )
-            .where(ResultTerritory.result_id == result_row.id)
-        )
-    ).all()
-
+        ).scalar()
+        or 0
+    )
+    limit = max(1, min(int(limit), 5000))
     features: list[dict[str, Any]] = []
-    for row in rows:
-        if not isinstance(row.geojson, str):
-            continue
-        try:
-            geometry = json.loads(row.geojson)
-        except json.JSONDecodeError:
-            continue
-        features.append(
-            {
-                "type": "Feature",
-                "geometry": geometry,
-                "properties": {
-                    "territory_name": str(row.territory_name),
-                    "change_class": str(row.change_class),
-                    "area_km2": round(float(row.area_km2 or 0), 6),
-                },
-            }
-        )
-    return {"type": "FeatureCollection", "features": features}
+    zones_total = total_zones
+    if dissolve:
+        grouped_rows = (
+            await session.execute(
+                select(  # type: ignore[call-overload]
+                    ResultTerritory.territory_name,
+                    ChangeZone.change_class,
+                    func.coalesce(func.sum(ChangeZone.area_km2), 0).label(
+                        "area_km2"
+                    ),
+                    func.count().label("zones_count"),
+                    func.ST_AsGeoJSON(
+                        func.ST_SimplifyPreserveTopology(
+                            func.ST_Multi(func.ST_Union(ChangeZone.geom)),
+                            0.0002,
+                        )
+                    ).label("geojson"),
+                )
+                .join(
+                    ResultTerritory,
+                    ResultTerritory.id == ChangeZone.result_territory_id,
+                )
+                .where(ResultTerritory.result_id == result_row.id)
+                .group_by(
+                    ResultTerritory.territory_name,
+                    ChangeZone.change_class,
+                )
+            )
+        ).all()
+        for row in grouped_rows:
+            if not isinstance(row.geojson, str):
+                continue
+            try:
+                geometry = json.loads(row.geojson)
+            except json.JSONDecodeError:
+                continue
+            count = int(row.zones_count or 0)
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": {
+                        "territory_name": str(row.territory_name),
+                        "change_class": str(row.change_class),
+                        "area_km2": round(float(row.area_km2 or 0), 6),
+                        "zones_count": count,
+                    },
+                }
+            )
+    else:
+        rows = (
+            await session.execute(
+                select(  # type: ignore[call-overload]
+                    ResultTerritory.territory_name,
+                    ChangeZone.change_class,
+                    ChangeZone.area_km2,
+                    func.ST_AsGeoJSON(
+                        func.ST_SimplifyPreserveTopology(ChangeZone.geom, 0.0005),
+                        5,
+                    ).label("geojson"),
+                )
+                .join(
+                    ResultTerritory,
+                    ResultTerritory.id == ChangeZone.result_territory_id,
+                )
+                .where(ResultTerritory.result_id == result_row.id)
+                .order_by(ChangeZone.area_km2.desc())  # type: ignore[attr-defined]
+                .limit(limit)
+            )
+        ).all()
+        for row in rows:
+            if not isinstance(row.geojson, str):
+                continue
+            try:
+                geometry = json.loads(row.geojson)
+            except json.JSONDecodeError:
+                continue
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": {
+                        "territory_name": str(row.territory_name),
+                        "change_class": str(row.change_class),
+                        "area_km2": round(float(row.area_km2 or 0), 6),
+                    },
+                }
+            )
+    return {
+        "type": "FeatureCollection",
+        "properties": {
+            "dissolved": bool(dissolve),
+            "features": len(features),
+            "zonesCount": zones_total,
+            "note": (
+                "Карта: показаны крупнейшие зоны; статистика по всем полигонам "
+                "доступна в результате анализа."
+                if not dissolve
+                else "Зоны объединены по классам для карты."
+            ),
+        },
+        "features": features,
+    }
 
 
 @router.get(

@@ -117,6 +117,10 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
                 query_text = query.text
                 query_id = str(query.id)
                 language = query.language
+                if isinstance(query.extracted, dict):
+                    resolved = query.extracted.get("territory")
+                    if isinstance(resolved, dict) and resolved.get("name"):
+                        analysis_context["resolved_territory"] = resolved
             else:
                 query_id = str(run.query_id)
             profile = await session.get(SettingsProfile, run.settings_hash)
@@ -458,6 +462,13 @@ async def _save_territories(
 
     total_area = Decimal("0")
     zones_count = 0
+    raw_aoi_geometry = context.get("aoi_geometry")
+    aoi_geometry = (
+        raw_aoi_geometry
+        if isinstance(raw_aoi_geometry, dict)
+        and raw_aoi_geometry.get("coordinates")
+        else None
+    )
     for position, (name, group) in enumerate(list(grouped.items())[:5], start=1):
         valid = [
             (zone, _zone_geom_expr(zone))
@@ -467,16 +478,31 @@ async def _save_territories(
         if not valid:
             continue
 
+        aoi_expr = (
+            _zone_geom_expr({"geometry": aoi_geometry})
+            if aoi_geometry is not None
+            else valid[0][1]
+        )
         aoi = AreaOfInterest(
             name=name,
             name_source="generated",
             aoi_type="admin",
-            boundary=valid[0][1],
+            boundary=aoi_expr,
             validity_fixed=True,
             area_km2=Decimal("0"),
         )
         session.add(aoi)
         await session.flush()
+        aoi_area = (
+            await session.execute(
+                select(
+                    func.ST_Area(cast(aoi_expr, Geography)) / 1000000.0
+                )
+            )
+        ).scalar()
+        if aoi_area is not None:
+            aoi.area_km2 = Decimal(str(aoi_area))
+            await session.flush()
 
         territory = ResultTerritory(
             result_id=result_row.id,

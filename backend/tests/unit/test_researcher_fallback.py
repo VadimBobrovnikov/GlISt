@@ -22,8 +22,76 @@ def test_heuristic_extracts_kazan_and_last_year() -> None:
 
 
 def test_geocode_cache_key_adds_country_filter_for_cyrillic() -> None:
-    assert _cache_key("Казани") == "казани|ru"
-    assert _cache_key("Kazan") == "kazan"
+    assert _cache_key("Казани") == "казани||other|ru|poly|v2"
+    assert _cache_key("Kazan") == "kazan||other|poly|v2"
+    assert (
+        _cache_key("Восточный", "Улан-Удэ", "district")
+        == "восточный|улан-удэ|district|ru|poly|v2"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Как изменилась зеленая зона Казани за последний год?", "Казани"),
+        ("Как изменилась зеленая зона Улан-Удэ за последний год?", "Улан-Удэ"),
+        ("Покажи изменение зеленых зон Улан-Удэ за 2 года", "Улан-Удэ"),
+    ],
+)
+def test_heuristic_extracts_city_from_area_phrase(
+    text: str,
+    expected: str,
+) -> None:
+    territory = _heuristic_params(text)["territories"][0]
+    assert territory["name"] == expected
+    assert territory["type"] == "city"
+
+
+def test_heuristic_extracts_district_and_parent_city() -> None:
+    params = _heuristic_params(
+        "Как изменилась зеленая зона Улан-Удэ в районе Восточный "
+        "за последний год?"
+    )
+    territory = params["territories"][0]
+    assert territory["name"] == "Восточный"
+    assert territory["parent"] == "Улан-Удэ"
+    assert territory["type"] == "district"
+
+
+def test_pick_territory_prefers_specific_place_with_parent() -> None:
+    data = [
+        {
+            "display_name": "Улан-Удэ, Республика Бурятия, Россия",
+            "boundingbox": ["51.70", "52.03", "107.40", "107.96"],
+            "addresstype": "city",
+            "type": "city",
+        },
+        {
+            "display_name": (
+                "Восточный, Железнодорожный район, Улан-Удэ, Россия"
+            ),
+            "boundingbox": ["51.8551", "51.8763", "107.7318", "107.7600"],
+            "addresstype": "suburb",
+            "type": "suburb",
+        },
+    ]
+    picked = _pick_territory(data, "Восточный", parent="Улан-Удэ")
+    assert picked is not None
+    assert picked["name"] == "Восточный"
+    assert picked["bbox"] == [107.7318, 51.8551, 107.76, 51.8763]
+    assert picked["ambiguous"] is False
+
+
+def test_pick_territory_rejects_city_for_district_query() -> None:
+    data = [
+        {
+            "display_name": "Улан-Удэ, Республика Бурятия, Россия",
+            "boundingbox": ["51.70", "52.03", "107.40", "107.96"],
+            "addresstype": "city",
+            "type": "city",
+        }
+    ]
+    assert _pick_territory(data, "Восточный", parent="Улан-Удэ") is None
 
 
 def test_pick_territory_prefers_admin_area_over_building() -> None:
@@ -116,6 +184,6 @@ async def test_researcher_rejects_empty_territory_names() -> None:
         ),
     )
     context = update["context"]
-    assert context["territories"][0]["name"].strip()
+    assert context["territories"][0]["name"] == ""
     assert context["period"]["start"] == "2023-01-01"
     assert context["period"]["end"] == "2023-02-01"

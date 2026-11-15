@@ -8,6 +8,7 @@ import '../../core/app_theme.dart';
 import '../../shared/models/models.dart';
 import '../history/history_view.dart';
 import '../progress/progress_view.dart';
+import 'territory_dialog.dart';
 
 /// Экран ввода запроса на естественном языке (T067).
 ///
@@ -64,7 +65,24 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
       _error = null;
     });
     try {
-      final QueryCreated created = await client.createQuery(text: text);
+      final Map<String, dynamic>? territory = await chooseTerritory(
+        context,
+        client,
+        text,
+      );
+      if (!mounted) {
+        return;
+      }
+      if (territory == null) {
+        setState(() {
+          _submitting = false;
+        });
+        return;
+      }
+      final QueryCreated created = await client.createQuery(
+        text: text,
+        territory: territory,
+      );
       if (!mounted) {
         return;
       }

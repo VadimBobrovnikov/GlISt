@@ -49,6 +49,32 @@ class ApiClient {
   /// Доступ к базовому [Dio] (для настройки интерсепторов извне).
   Dio get dio => _dio;
 
+  /// Предварительный выбор территории (район + город) до анализа.
+  Future<Map<String, dynamic>> resolveTerritory({
+    required String text,
+    String? name,
+    String? parent,
+    String? type,
+  }) async {
+    final Response<dynamic> response = await _send(
+      () => _dio.post<dynamic>(
+        '/api/v1/territories/resolve',
+        data: <String, dynamic>{
+          'text': text,
+          'name': ?name,
+          'parent': ?parent,
+          'type': ?type,
+        },
+        // Извлечение территории идёт через LLM и геокодер: 30 с мало.
+        options: Options(receiveTimeout: const Duration(seconds: 90)),
+      ),
+    );
+    final Object? data = response.data;
+    return data is Map<String, dynamic>
+        ? data
+        : <String, dynamic>{};
+  }
+
   /// POST /api/v1/queries — создание запроса и запуска анализа.
   ///
   /// Возвращает [QueryCreated] с запросом и запуском; при необходимости
@@ -57,11 +83,13 @@ class ApiClient {
     required String text,
     String? parentQueryId,
     String? mode,
+    Map<String, dynamic>? territory,
   }) async {
     final Map<String, dynamic> payload = <String, dynamic>{
       'text': text,
       'parentQueryId': ?parentQueryId,
       'mode': ?mode,
+      'territory': ?territory,
     };
     final Response<dynamic> response = await _send(
       () => _dio.post<dynamic>('/api/v1/queries', data: payload),
@@ -213,10 +241,38 @@ class ApiClient {
     try {
       return await request();
     } on DioException catch (error) {
-      throw ApiException.fromResponse(
-        error.response?.statusCode,
-        error.response?.data,
-      );
+      final Response<dynamic>? response = error.response;
+      if (response == null) {
+        // Без ответа сервера нельзя выдавать «ошибку API»: таймаут,
+        // отсутствие сети и отказ соединения — разные причины.
+        throw ApiException(
+          message: _transportMessage(error),
+          code: error.type.name,
+        );
+      }
+      throw ApiException.fromResponse(response.statusCode, response.data);
+    }
+  }
+
+  /// Понятное описание транспортной ошибки (ответа сервера нет).
+  static String _transportMessage(DioException error) {
+    switch (error.type) {
+      case DioExceptionType.connectionTimeout:
+      case DioExceptionType.sendTimeout:
+      case DioExceptionType.receiveTimeout:
+      case DioExceptionType.transformTimeout:
+        return 'Сервер не ответил вовремя. Повторите запрос: если это '
+            'повторяется, выберите участок на карте вручную.';
+      case DioExceptionType.connectionError:
+        return 'Нет связи с API. Проверьте подключение к сети.';
+      case DioExceptionType.badCertificate:
+        return 'Не удалось проверить сертификат сервера API.';
+      case DioExceptionType.cancel:
+        return 'Запрос к API отменён.';
+      case DioExceptionType.badResponse:
+      case DioExceptionType.unknown:
+        return 'Не удалось выполнить запрос к API: '
+            '${error.message ?? 'неизвестная ошибка'}';
     }
   }
 }

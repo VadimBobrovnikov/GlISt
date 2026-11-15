@@ -1,13 +1,13 @@
 import 'dart:async';
-import 'dart:js_interop';
 
 import 'package:flutter/material.dart';
-import 'package:web/web.dart' as web;
 
 import '../../core/api_client.dart';
 import '../../core/api_provider.dart';
 import '../../core/app_theme.dart';
 import '../../shared/models/models.dart';
+import 'download_file_stub.dart'
+    if (dart.library.js_interop) 'download_file_web.dart';
 
 /// Кнопка скачивания результата анализа в PDF или GeoJSON.
 ///
@@ -73,19 +73,7 @@ class _ExportButtonState extends State<ExportButton> {
   }
 
   void _triggerDownload(DownloadedFile file) {
-    final web.Blob blob = web.Blob(
-      <JSAny>[file.bytes.toJS].toJS,
-      web.BlobPropertyBag(type: file.mimeType),
-    );
-    final String url = web.URL.createObjectURL(blob);
-    final web.HTMLAnchorElement anchor = web.HTMLAnchorElement()
-      ..href = url
-      ..download = file.filename
-      ..style.display = 'none';
-    web.document.body?.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    web.URL.revokeObjectURL(url);
+    triggerBrowserDownload(file);
   }
 
   @override

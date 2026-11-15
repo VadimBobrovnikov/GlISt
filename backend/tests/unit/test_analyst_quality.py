@@ -237,6 +237,139 @@ async def test_analyst_read_failure_is_technical_not_data_quality(
 
 
 @pytest.mark.asyncio
+async def test_chunk_bboxes_cover_full_bbox_without_gaps() -> None:
+    bbox = [37.0, 55.0, 37.56, 55.33]
+    chunks = analyst_module._chunk_bboxes(bbox, 0.25)
+    assert len(chunks) == 6
+    assert min(chunk[0] for chunk in chunks) == pytest.approx(37.0)
+    assert max(chunk[2] for chunk in chunks) == pytest.approx(37.56)
+    assert min(chunk[1] for chunk in chunks) == pytest.approx(55.0)
+    assert max(chunk[3] for chunk in chunks) == pytest.approx(55.33)
+
+
+def test_aoi_mask_fills_bbox_polygon() -> None:
+    geometry = analyst_module._bbox_polygon([0.0, 0.0, 1.0, 1.0])
+    mask = analyst_module._aoi_mask(
+        geometry,
+        Affine(0.1, 0, 0.0, 0, -0.1, 1.0),
+        (10, 10),
+        "EPSG:4326",
+    )
+    assert mask.shape == (10, 10)
+    assert bool(mask.all())
+
+
+def test_aoi_mask_reprojects_to_raster_crs() -> None:
+    geometry = analyst_module._bbox_polygon([37.5, 55.7, 37.6, 55.8])
+    mask = analyst_module._aoi_mask(
+        geometry,
+        Affine(10, 0, 420000, 0, -10, 6200000),
+        (8, 8),
+        "EPSG:32637",
+    )
+    assert mask.shape == (8, 8)
+    assert mask.dtype == bool
+
+
+@pytest.mark.asyncio
+async def test_district_without_parent_is_not_replaced_by_city() -> None:
+    with patch.object(
+        analyst_module,
+        "geocode_territory",
+        AsyncMock(return_value=None),
+    ) as geocode:
+        aoi = await analyst_module._resolve_territory_aoi(
+            {"name": "Восточный", "type": "district"},
+            "Восточный",
+        )
+    assert aoi["bbox"] is None
+    assert "не указан город" in str(aoi["error"])
+    geocode.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_district_not_found_does_not_fall_back_to_city() -> None:
+    with patch.object(
+        analyst_module,
+        "geocode_territory",
+        AsyncMock(return_value=None),
+    ):
+        aoi = await analyst_module._resolve_territory_aoi(
+            {"name": "Восточный", "parent": "Улан-Удэ", "type": "district"},
+            "Восточный",
+        )
+    assert aoi["bbox"] is None
+    assert aoi["source"] == "district_not_found"
+    assert "Улан-Удэ" in str(aoi["error"])
+
+
+@pytest.mark.asyncio
+async def test_district_aoi_uses_district_geometry_not_city() -> None:
+    district_bbox = [107.7318, 51.8551, 107.76, 51.8763]
+    payload = {
+        "name": "Восточный",
+        "displayName": "Восточный, Железнодорожный район, Улан-Удэ, Россия",
+        "addresstype": "suburb",
+        "bbox": district_bbox,
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [
+                [
+                    [107.7318, 51.8551],
+                    [107.76, 51.8551],
+                    [107.76, 51.8763],
+                    [107.7318, 51.8763],
+                    [107.7318, 51.8551],
+                ]
+            ],
+        },
+        "ambiguous": False,
+        "candidates": [],
+    }
+    with patch.object(
+        analyst_module,
+        "geocode_territory",
+        AsyncMock(return_value=payload),
+    ):
+        aoi = await analyst_module._resolve_territory_aoi(
+            {"name": "Восточный", "parent": "Улан-Удэ", "type": "district"},
+            "Восточный",
+        )
+    assert aoi["bbox"] == district_bbox
+    assert aoi["bbox"] != [107.4083748, 51.7102432, 107.9584077, 52.0276612]
+    assert aoi["source"] == "geocoding+polygon"
+
+
+@pytest.mark.asyncio
+async def test_analyst_district_failure_has_no_city_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GLIST_TESTING", raising=False)
+    state = {
+        "context": {
+            "territories": [
+                {
+                    "name": "Восточный",
+                    "parent": "Улан-Удэ",
+                    "type": "district",
+                }
+            ],
+            "period": {"start": "2025-01-01", "end": "2026-01-01"},
+        }
+    }
+    with patch.object(
+        analyst_module,
+        "geocode_territory",
+        AsyncMock(return_value=None),
+    ):
+        update = await analyst_node(state)
+    context = update["context"]
+    assert context["change_zones"] == []
+    assert context["analysis_failure"]["stage"] == "territory_selection"
+    assert context["analysis_diagnostics"]["requestedTerritory"]["parent"] == "Улан-Удэ"
+
+
+@pytest.mark.asyncio
 async def test_validator_requires_quality_for_interpretation() -> None:
     state = {
         "context": {

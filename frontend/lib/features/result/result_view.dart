@@ -556,13 +556,26 @@ class _ResultScreenState extends State<ResultScreen> {
     final Object? sharedAreaRaw = result.coverage['sharedValidAreaKm2'];
     final Object? unknownAreaRaw = result.coverage['unknownAreaKm2'];
     final Object? unknownRaw = result.coverage['unknown'];
+    final Object? territoryAreaRaw = result.coverage['territoryAreaKm2'];
     final double? sharedArea =
         sharedAreaRaw is num ? sharedAreaRaw.toDouble() : null;
     final double? unknownArea =
         unknownAreaRaw is num ? unknownAreaRaw.toDouble() : null;
     final double? unknownShare = unknownRaw is num ? unknownRaw.toDouble() : null;
+    final double? territoryArea =
+        territoryAreaRaw is num ? territoryAreaRaw.toDouble() : null;
     final Map<String, dynamic> dates =
         JsonUtils.asMap(result.diagnostics['actualDates']);
+    final Map<String, dynamic> aoi =
+        JsonUtils.asMap(result.diagnostics['aoi']);
+    final Map<String, dynamic> territorySelection =
+        JsonUtils.asMap(result.diagnostics['territorySelection']);
+    final Map<String, dynamic> requestedTerritory =
+        JsonUtils.asMap(territorySelection['requested']);
+    final String aoiName =
+        JsonUtils.asStringOr(aoi['requestedName'], '').trim();
+    final String aoiParent =
+        JsonUtils.asStringOr(requestedTerritory['parent'], '').trim();
     final Map<String, dynamic> requested =
         JsonUtils.asMap(result.diagnostics['requestedPeriod']);
     final Map<String, dynamic> selection =
@@ -615,12 +628,25 @@ class _ResultScreenState extends State<ResultScreen> {
               ),
             ],
           ),
+          if (aoiName.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 6),
+            Text(
+              'Территория анализа: $aoiName'
+              '${aoiParent.isEmpty ? '' : ' ($aoiParent)'}',
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: AppColors.text,
+              ),
+            ),
+          ],
           if (shared != null) ...<Widget>[
             const SizedBox(height: 6),
             Text(
-              'Общее валидное покрытие обеих дат: '
+              'Покрытие территории обеих дат: '
               '${(shared * 100).toStringAsFixed(1)}%'
-              '${sharedArea == null ? '' : ' · ${_formatArea(sharedArea)}'}',
+              '${sharedArea == null ? '' : ' · ${_formatArea(sharedArea)}'}'
+              '${territoryArea == null ? '' : ' из ${_formatArea(territoryArea)}'}',
               style: const TextStyle(fontSize: 12, color: AppColors.text),
             ),
           ],
@@ -662,6 +688,11 @@ class _ResultScreenState extends State<ResultScreen> {
               ),
             ),
           ],
+          const SizedBox(height: 6),
+          const Text(
+            'Вне границы запрошенной территории изменения не оценивались.',
+            style: TextStyle(fontSize: 12, color: AppColors.muted),
+          ),
           for (final String limitation in limitations)
             Padding(
               padding: const EdgeInsets.only(top: 4),

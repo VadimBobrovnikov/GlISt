@@ -265,6 +265,24 @@ class _MapViewState extends State<MapView> {
     return zones;
   }
 
+  /// Контур запрошенной территории (AOI) — рисуется всегда.
+  List<Polygon> _aoiPolygons() {
+    final List<Polygon> polygons = <Polygon>[];
+    for (final ResultTerritory territory in widget.result.territories) {
+      for (final List<LatLng> ring in _ringsFromGeometry(territory.boundary)) {
+        polygons.add(
+          Polygon(
+            points: ring,
+            color: Colors.transparent,
+            borderColor: AppColors.primary,
+            borderStrokeWidth: 2,
+          ),
+        );
+      }
+    }
+    return polygons;
+  }
+
   ChangeClass _dominantClass(ResultTerritory territory) {
     final double retained = territory.stats[ChangeClass.retained]?.areaKm2 ?? 0;
     final double lost = territory.stats[ChangeClass.lost]?.areaKm2 ?? 0;
@@ -299,7 +317,11 @@ class _MapViewState extends State<MapView> {
     final List<ChangeZone> zones = _zones
         .where((ChangeZone zone) => _visible.contains(zone.changeClass))
         .toList(growable: false);
+    final List<Polygon> aoiPolygons = _aoiPolygons();
     final List<LatLng> allPoints = <LatLng>[];
+    for (final Polygon polygon in aoiPolygons) {
+      allPoints.addAll(polygon.points);
+    }
     final List<Polygon> polygons = <Polygon>[];
     for (final ChangeZone zone in zones) {
       for (final List<LatLng> ring in zone.rings) {
@@ -382,6 +404,7 @@ class _MapViewState extends State<MapView> {
                 ],
               ),
             if (_showPolygons) PolygonLayer(polygons: polygons),
+            if (aoiPolygons.isNotEmpty) PolygonLayer(polygons: aoiPolygons),
           ],
         ),
         Positioned(top: 16, left: 16, child: _analysisChip()),
@@ -569,6 +592,10 @@ class _MapViewState extends State<MapView> {
               'после ${after.isEmpty ? '—' : after}.',
               style: const TextStyle(fontSize: 10, color: AppColors.muted),
             ),
+          const Text(
+            'Карта: крупнейшие зоны; статистика — по всем полигонам.',
+            style: TextStyle(fontSize: 10, color: AppColors.muted),
+          ),
         ],
       ),
     );
@@ -845,3 +872,8 @@ class _MapViewState extends State<MapView> {
     );
   }
 }
+
+/// Публичный разбор GeoJSON-геометрии в кольца координат.
+List<List<LatLng>> ringsFromGeometry(Map<String, dynamic> geometry) =>
+    _ringsFromGeometry(geometry);
+

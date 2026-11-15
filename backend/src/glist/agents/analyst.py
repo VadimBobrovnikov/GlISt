@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import logging
+import math
 import os
 import time
 from datetime import date, timedelta
@@ -17,6 +18,9 @@ from typing import Any
 
 import numpy as np
 from rasterio.enums import Resampling
+from rasterio.features import rasterize
+from rasterio.transform import Affine
+from rasterio.warp import transform_bounds, transform_geom
 
 from glist.tools.change_zones import build_change_zones
 from glist.tools.geocode import geocode_territory
@@ -41,7 +45,7 @@ COMPOSITE_WINDOW_DAYS = 30
 EXPANDED_WINDOW_DAYS = 60
 REFLECTANCE_SCALE = 0.0001
 SCL_SCALE = 1.0
-MAX_BBOX_SPAN_DEG = 0.12
+MAX_BBOX_SPAN_DEG = 0.7
 MIN_VALID_COVERAGE = 0.1
 # Рабочий параметр пригодности, НЕ подтверждённый критерий точности:
 # ниже него результат считается технически рассчитанным, но ограниченным.
@@ -50,7 +54,8 @@ _MAX_SEASON_ATTEMPTS = 3
 _SEASON_SEARCH_BUDGET_SECONDS = 90.0
 _GRID_TOLERANCE_PIXELS = 1e-6
 _BAND_READ_CONCURRENCY = 4
-_COMPOSITE_TIMEOUT_SECONDS = 180.0
+_COMPOSITE_TIMEOUT_SECONDS = 900.0
+ANALYSIS_CHUNK_SPAN_DEG = 0.3
 _CHANGE_CLASSES = ("retained", "lost", "new")
 _SEASON_BY_MONTH = {
     12: "зима",
@@ -65,11 +70,6 @@ _SEASON_BY_MONTH = {
     9: "осень",
     10: "осень",
     11: "осень",
-}
-# Резервные bbox для известных городов на случай недоступности Nominatim.
-_STATIC_BBOXES: dict[str, list[float]] = {
-    "москв": [37.35, 55.55, 37.95, 55.95],
-    "казан": [48.82, 55.60, 49.38, 55.93],
 }
 _TESTING_VALUES = frozenset({"1", "true", "yes", "on"})
 
@@ -115,23 +115,21 @@ def _actual_dates(items: list[dict[str, Any]]) -> list[str]:
     return sorted(dates)
 
 
-def _limit_bbox(bbox: list[float]) -> list[float]:
-    """Ограничивает bbox разумным окном анализа (память и время)."""
+def _bbox_polygon(bbox: list[float]) -> dict[str, Any]:
+    """Прямоугольник bbox как GeoJSON-полигон (fallback границы)."""
     west, south, east, north = bbox
-    if (
-        east - west <= MAX_BBOX_SPAN_DEG
-        and north - south <= MAX_BBOX_SPAN_DEG
-    ):
-        return [west, south, east, north]
-    center_lon = (west + east) / 2
-    center_lat = (south + north) / 2
-    half = MAX_BBOX_SPAN_DEG / 2
-    return [
-        center_lon - half,
-        center_lat - half,
-        center_lon + half,
-        center_lat + half,
-    ]
+    return {
+        "type": "Polygon",
+        "coordinates": [
+            [
+                [west, south],
+                [east, south],
+                [east, north],
+                [west, north],
+                [west, south],
+            ]
+        ],
+    }
 
 
 def _bbox_from_payload(payload: object) -> list[float] | None:
@@ -150,32 +148,241 @@ def _bbox_from_payload(payload: object) -> list[float] | None:
     return values
 
 
-async def _resolve_bbox(
+async def _resolve_territory_aoi(
     territory: dict[str, Any],
     name: str,
-) -> list[float] | None:
-    """Определяет bbox территории: из состояния или через Nominatim."""
-    bbox = territory.get("bbox")
-    if isinstance(bbox, list) and len(bbox) == 4:
+) -> dict[str, Any]:
+    """Выбирает AOI с учётом района и города (без подмены район→город)."""
+    parent_raw = territory.get("parent")
+    parent = (
+        parent_raw.strip()
+        if isinstance(parent_raw, str) and parent_raw.strip()
+        else None
+    )
+    requested = {
+        "name": name,
+        "parent": parent,
+        "type": territory.get("type"),
+    }
+
+    def failure(
+        message: str,
+        stage: str,
+        source: str,
+        candidates: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "bbox": None,
+            "geometry": None,
+            "error": message,
+            "stage": stage,
+            "source": source,
+            "requestedTerritory": requested,
+            "candidates": candidates or [],
+        }
+
+    if parent is None and territory.get("type") == "district":
+        return failure(
+            f"Для района «{name}» не указан город. Уточните запрос.",
+            "territory_selection",
+            "district_without_parent",
+        )
+
+    geometry: dict[str, Any] | None = None
+    raw_geometry = territory.get("geometry")
+    if isinstance(raw_geometry, dict):
+        geometry = raw_geometry
+    values = _bbox_from_payload({"bbox": territory.get("bbox")})
+
+    if values is not None and geometry is not None:
+        # Пользователь уже подтвердил территорию: используем ровно эту
+        # геометрию, без повторного геокодинга и обрезки.
+        return {
+            "bbox": values,
+            "geometry": geometry,
+            "error": None,
+            "stage": "ok",
+            "source": str(territory.get("source") or "confirmed"),
+            "requestedTerritory": requested,
+            "displayName": territory.get("displayName"),
+            "addresstype": territory.get("addresstype"),
+            "candidates": [],
+        }
+
+    geocoded: dict[str, Any] | None = None
+    if values is None or geometry is None:
         try:
-            values = [float(item) for item in bbox]
-        except (TypeError, ValueError):
-            values = []
-        if len(values) == 4 and values[2] > values[0] and values[3] > values[1]:
-            return _limit_bbox(values)
-    lowered = name.lower()
-    for key, static_bbox in _STATIC_BBOXES.items():
-        if key in lowered:
-            logger.info(
-                "Analyst: использую статический bbox для территории %s",
+            geocoded = await geocode_territory(
                 name,
+                parent=parent,
+                object_type=territory.get("type"),
             )
-            return _limit_bbox(static_bbox)
-    geocoded = await geocode_territory(name)
-    payload_bbox = _bbox_from_payload(geocoded)
-    if payload_bbox is not None:
-        return _limit_bbox(payload_bbox)
-    return None
+        except Exception as exc:  # noqa: BLE001 — сеть/HTTP/разбор
+            return failure(
+                f"Геокодер недоступен или ограничил запросы ({exc}). "
+                "Можно выбрать участок на карте вручную.",
+                "territory_selection",
+                "geocoder_error",
+            )
+    if values is None and geocoded is not None:
+        values = _bbox_from_payload(geocoded)
+    if values is None and parent is not None:
+        return failure(
+            f"Район «{name}» в «{parent}» не найден. Уточните название "
+            "или выберите участок на карте.",
+            "territory_selection",
+            "district_not_found",
+        )
+    if values is None:
+        return failure(
+            f"Не удалось определить границы территории «{name}»",
+            "geocoding",
+            "geocoding",
+        )
+
+    source = "geocoding"
+    candidates: list[dict[str, Any]] = []
+    display_name: str | None = None
+    if parent is not None:
+        if geocoded is None:
+            return failure(
+                f"Район «{name}» в «{parent}» не найден.",
+                "territory_selection",
+                "district_not_found",
+            )
+        display_name = str(
+            geocoded.get("displayName") or geocoded.get("name") or ""
+        )
+        if parent.lower().replace("ё", "е") not in display_name.lower().replace(
+            "ё", "е"
+        ):
+            return failure(
+                f"Геокодер вернул объект вне «{parent}»: {display_name}. "
+                "Уточните запрос или выберите участок на карте.",
+                "territory_selection",
+                "district_parent_mismatch",
+            )
+        candidates = [
+            item
+            for item in (geocoded.get("candidates") or [])
+            if isinstance(item, dict) and item.get("bbox")
+        ][:8]
+        if geocoded.get("ambiguous"):
+            names = "; ".join(
+                str(item.get("displayName") or item.get("name"))
+                for item in candidates[:5]
+            )
+            return failure(
+                f"Найдено несколько объектов: {names}. Выберите нужный.",
+                "territory_selection",
+                "ambiguous",
+                candidates,
+            )
+        geometry = geocoded.get("geometry")
+        if not isinstance(geometry, dict) or geometry.get("type") not in (
+            "Polygon",
+            "MultiPolygon",
+        ):
+            return failure(
+                f"Граница района «{name}» не найдена. Выберите участок на карте.",
+                "territory_selection",
+                "district_boundary_missing",
+                candidates,
+            )
+        values = _bbox_from_payload(geocoded) or values
+        source = "geocoding+polygon"
+    else:
+        if geometry is None and geocoded is not None:
+            candidate = geocoded.get("geometry")
+            if isinstance(candidate, dict) and candidate.get("type") in (
+                "Polygon",
+                "MultiPolygon",
+            ):
+                geometry = candidate
+                display_name = geocoded.get("displayName")
+        if geometry is None:
+            geometry = _bbox_polygon(values)
+            source = "geocoding+bbox_polygon"
+        else:
+            source = "geocoding+polygon"
+
+    west, south, east, north = values
+    if east - west > MAX_BBOX_SPAN_DEG or north - south > MAX_BBOX_SPAN_DEG:
+        return {
+            "bbox": values,
+            "geometry": geometry,
+            "error": (
+                f"Территория «{name}» превышает лимит анализа "
+                f"({east - west:.2f}°×{north - south:.2f}° при максимуме "
+                f"{MAX_BBOX_SPAN_DEG:.2f}°). Выберите участок."
+            ),
+            "stage": "aoi_size",
+            "source": source,
+            "requestedTerritory": requested,
+            "candidates": candidates,
+        }
+    return {
+        "bbox": values,
+        "geometry": geometry,
+        "error": None,
+        "stage": "ok",
+        "source": source,
+        "requestedTerritory": requested,
+        "displayName": display_name,
+        "addresstype": geocoded.get("addresstype") if geocoded else None,
+        "candidates": candidates,
+    }
+
+
+def _chunk_bboxes(
+    bbox: list[float],
+    span_deg: float,
+) -> list[list[float]]:
+    """Делит bbox на участки не больше ``span_deg`` (память и время)."""
+    west, south, east, north = bbox
+    lon_steps = max(1, math.ceil((east - west) / span_deg))
+    lat_steps = max(1, math.ceil((north - south) / span_deg))
+    step_lon = (east - west) / lon_steps
+    step_lat = (north - south) / lat_steps
+    chunks: list[list[float]] = []
+    for i in range(lon_steps):
+        for j in range(lat_steps):
+            chunks.append(
+                [
+                    west + i * step_lon,
+                    south + j * step_lat,
+                    west + (i + 1) * step_lon,
+                    south + (j + 1) * step_lat,
+                ]
+            )
+    return chunks
+
+
+def _aoi_mask(
+    geometry: dict[str, Any] | None,
+    transform: Any,
+    shape: tuple[int, int],
+    crs: str | None,
+) -> np.ndarray:
+    """Растеризует границу территории на сетку анализа (CRS растра)."""
+    if not isinstance(geometry, dict):
+        return np.ones(shape, dtype=bool)
+    target_geometry = geometry
+    if crs is not None and crs != "EPSG:4326":
+        try:
+            target_geometry = transform_geom("EPSG:4326", crs, geometry)
+        except Exception:  # noqa: BLE001 — без маски лучше, чем упасть
+            logger.warning("Analyst: не удалось перепроецировать AOI в %s", crs)
+            return np.ones(shape, dtype=bool)
+    burned = rasterize(
+        [(target_geometry, 1)],
+        out_shape=shape,
+        transform=transform,
+        fill=0,
+        dtype="uint8",
+        all_touched=False,
+    )
+    return np.asarray(burned, dtype=bool)
 
 
 async def _search_center(
@@ -184,46 +391,55 @@ async def _search_center(
     role: str,
     bounds: tuple[date, date] | None = None,
 ) -> list[dict[str, Any]]:
-    """Ищет сцены в окне ±30 дней, при пустом результате — ±60 дней.
+    """Ищет сцены в окне ±60 дней и оставляет тот же сезон.
 
-    ``bounds`` ограничивает окно поиска пределами исходного запроса: подбор
-    сопоставимого сезона не должен выходить за запрошенный период.
+    Широкое окно нужно для покрытия: в облачный месяц ±30 даёт мало пригодных
+    пикселей. ``bounds`` ограничивает окно пределами запроса.
     """
-    for days in (COMPOSITE_WINDOW_DAYS, EXPANDED_WINDOW_DAYS):
-        start, end = _window(center, days)
-        if bounds is not None:
-            start = max(start, bounds[0].isoformat())
-            end = min(end, bounds[1].isoformat())
-            if start > end:
-                continue
-        scenes = await search_sentinel2_scenes(
-            bbox,
-            start,
-            end,
-            max_cloud_cover=MAX_CLOUD_COVER,
-            limit=10,
+    start, end = _window(center, EXPANDED_WINDOW_DAYS)
+    if bounds is not None:
+        start = max(start, bounds[0].isoformat())
+        end = min(end, bounds[1].isoformat())
+        if start > end:
+            return []
+    scenes = await search_sentinel2_scenes(
+        bbox,
+        start,
+        end,
+        max_cloud_cover=MAX_CLOUD_COVER,
+        limit=20,
+    )
+    if not scenes:
+        return []
+    for scene in scenes:
+        parsed = _parse_date(scene.get("datetime"))
+        delta = abs((parsed - center).days) if parsed is not None else 60
+        scene["window_days"] = (
+            COMPOSITE_WINDOW_DAYS if delta <= COMPOSITE_WINDOW_DAYS else
+            EXPANDED_WINDOW_DAYS
         )
-        if not scenes:
-            continue
-        scenes.sort(key=lambda scene: float(scene.get("cloud_cover") or 100))
-        center_season = _SEASON_BY_MONTH.get(center.month)
-        same_season = [
-            scene
-            for scene in scenes
-            if _season_for(scene.get("datetime")) == center_season
-        ]
-        pool = same_season or scenes
-        selected = pool[:MAX_SCENES_PER_PERIOD]
-        for scene in selected:
-            scene["role"] = role
-        logger.info(
-            "Analyst: %s — %d сцен в окне ±%d дней",
-            role,
-            len(selected),
-            days,
-        )
-        return selected
-    return []
+    ordered = sorted(
+        scenes,
+        key=lambda scene: float(scene.get("cloud_cover") or 100),
+    )
+    center_season = _SEASON_BY_MONTH.get(center.month)
+    same_season = [
+        scene
+        for scene in ordered
+        if _season_for(scene.get("datetime")) == center_season
+    ]
+    pool = same_season or ordered
+    selected = pool[:MAX_SCENES_PER_PERIOD]
+    for scene in selected:
+        scene["role"] = role
+    logger.info(
+        "Analyst: %s — %d сцен (кандидатов %d, окно ±%d дней)",
+        role,
+        len(selected),
+        len(scenes),
+        EXPANDED_WINDOW_DAYS,
+    )
+    return selected
 
 
 def _clamp_date(year: int, month: int, day: int) -> date | None:
@@ -452,6 +668,7 @@ def _scene_meta(scene: dict[str, Any]) -> dict[str, Any]:
         "sclOffset": scene.get("scl_offset"),
         "boaOffsetDn": scene.get("boa_offset_dn"),
         "boaOffsetApplied": scene.get("boa_offset_applied"),
+        "windowDays": scene.get("window_days"),
     }
 
 
@@ -528,12 +745,28 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
 
     first = territories[0] if isinstance(territories[0], dict) else {}
     territory_name = str(first.get("name") or "Территория")
-    bbox = await _resolve_bbox(first, territory_name)
+    aoi = await _resolve_territory_aoi(first, territory_name)
+    bbox = aoi.get("bbox")
+    aoi_geometry = aoi.get("geometry")
+    aoi_source = str(aoi.get("source") or "geocoding")
+    territory_display = aoi.get("displayName")
+    territory_info = {
+        "requested": aoi.get("requestedTerritory"),
+        "displayName": territory_display,
+        "addresstype": aoi.get("addresstype"),
+        "source": aoi_source,
+        "candidates": aoi.get("candidates") or [],
+    }
     if bbox is None:
         return _fail(
             context,
-            f"Не удалось определить границы территории «{territory_name}»",
-            stage="geocoding",
+            str(aoi.get("error") or "Не удалось определить территорию анализа"),
+            diagnostics={
+                "territorySelection": territory_info,
+                "requestedTerritory": aoi.get("requestedTerritory"),
+                "candidates": aoi.get("candidates") or [],
+            },
+            stage=str(aoi.get("stage") or "territory_selection"),
         )
 
     threshold = float(context.get("ndvi_threshold") or DEFAULT_NDVI_THRESHOLD)
@@ -559,36 +792,87 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
             stage="stac_search",
         )
 
-    try:
-        start_result = await asyncio.wait_for(
-            _period_composite(start_scenes, bbox),
-            timeout=_COMPOSITE_TIMEOUT_SECONDS,
-        )
-        end_result = await asyncio.wait_for(
-            _period_composite(end_scenes, bbox),
-            timeout=_COMPOSITE_TIMEOUT_SECONDS,
-        )
-    except TimeoutError:
-        return _fail(
-            context,
-            "Таймаут чтения сцен Sentinel-2 (COG)",
-            {"accepted": [], "rejected": []},
+    chunk_records: list[dict[str, Any]] = []
+    accepted_by_key: dict[str, dict[str, Any]] = {}
+    rejected_by_key: dict[str, dict[str, Any]] = {}
+    failed_chunks: list[list[float]] = []
+    for chunk_bbox in _chunk_bboxes(bbox, ANALYSIS_CHUNK_SPAN_DEG):
+        try:
+            start_result = await asyncio.wait_for(
+                _period_composite(start_scenes, chunk_bbox),
+                timeout=_COMPOSITE_TIMEOUT_SECONDS,
+            )
+            end_result = await asyncio.wait_for(
+                _period_composite(end_scenes, chunk_bbox),
+                timeout=_COMPOSITE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            failed_chunks.append(chunk_bbox)
+            continue
+        start_ndvi, start_grid, start_ok_chunk, start_bad = start_result
+        end_ndvi, end_grid, end_ok_chunk, end_bad = end_result
+        for item in [*start_ok_chunk, *end_ok_chunk]:
+            accepted_by_key[
+                f"{item.get('sceneId')}|{item.get('role')}"
+            ] = item
+        for item in [*start_bad, *end_bad]:
+            rejected_by_key[
+                f"{item.get('sceneId')}|{item.get('role')}"
+            ] = item
+        if (
+            start_ndvi is None
+            or end_ndvi is None
+            or start_grid is None
+            or end_grid is None
+            or start_grid["crs"] is None
+            or end_grid["crs"] is None
+            or np.isnan(start_ndvi).all()
+            or np.isnan(end_ndvi).all()
+        ):
+            failed_chunks.append(chunk_bbox)
+            continue
+        grid_check = _grid_differences(start_grid["info"], end_grid["info"])
+        grid_alignment = "none"
+        if not grid_check["compatibleWithoutResampling"]:
+            end_ndvi = await asyncio.to_thread(
+                reproject_to_grid,
+                end_ndvi,
+                src_transform=end_grid["transform"],
+                src_crs=end_grid["crs"],
+                dst_transform=start_grid["transform"],
+                dst_crs=start_grid["crs"],
+                dst_shape=start_grid["shape"],
+                resampling=Resampling.bilinear,
+            )
+            grid_alignment = "end_reprojected_to_start"
+        rows, cols = start_grid["shape"]
+        chunk_records.append(
             {
-                "bbox": bbox,
-                "requestedPeriod": {
-                    "start": start_date.isoformat(),
-                    "end": end_date.isoformat(),
-                },
-                "periodSelection": period_selection,
-                "actualDates": {"start": [], "end": []},
-            },
-            stage="scene_read",
+                "bbox": chunk_bbox,
+                "start_ndvi": start_ndvi[:rows, :cols],
+                "end_ndvi": end_ndvi[:rows, :cols],
+                "start_grid": start_grid,
+                "end_grid": end_grid,
+                "grid_check": grid_check,
+                "grid_alignment": grid_alignment,
+                "rows": rows,
+                "cols": cols,
+            }
         )
-    start_ndvi, start_grid, start_ok, start_bad = start_result
-    end_ndvi, end_grid, end_ok, end_bad = end_result
+
+    start_ok = [
+        item
+        for item in accepted_by_key.values()
+        if item.get("role") == "start_period"
+    ]
+    end_ok = [
+        item
+        for item in accepted_by_key.values()
+        if item.get("role") == "end_period"
+    ]
     datasets = {
         "accepted": [*start_ok, *end_ok],
-        "rejected": [*start_bad, *end_bad],
+        "rejected": list(rejected_by_key.values()),
     }
     actual_dates = {
         "start": _actual_dates(start_ok),
@@ -596,6 +880,19 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
     }
     period_diagnostics: dict[str, Any] = {
         "bbox": bbox,
+        "aoi": {
+            "bbox": bbox,
+            "source": aoi_source,
+            "geometryType": (
+                aoi_geometry.get("type")
+                if isinstance(aoi_geometry, dict)
+                else None
+            ),
+            "requestedName": territory_name,
+            "parent": (aoi.get("requestedTerritory") or {}).get("parent"),
+            "displayName": territory_display,
+        },
+        "territorySelection": territory_info,
         "requestedPeriod": {
             "start": start_date.isoformat(),
             "end": end_date.isoformat(),
@@ -607,79 +904,153 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
             "end": [item.get("sceneId") for item in end_ok],
         },
         "scenes": {"start": start_ok, "end": end_ok},
+        "chunks": {
+            "processed": len(chunk_records),
+            "failed": len(failed_chunks),
+            "spanDeg": ANALYSIS_CHUNK_SPAN_DEG,
+        },
     }
-
-    if (
-        start_ndvi is None
-        or end_ndvi is None
-        or start_grid is None
-        or end_grid is None
-    ):
+    if not chunk_records:
         return _fail(
             context,
-            "Не удалось построить NDVI-композит",
-            datasets,
-            period_diagnostics,
-            stage="scene_read",
-        )
-    if start_grid["crs"] is None or end_grid["crs"] is None:
-        return _fail(
-            context,
-            "Не удалось определить CRS сцен",
-            datasets,
-            period_diagnostics,
-            stage="scene_read",
-        )
-    if np.isnan(start_ndvi).all() or np.isnan(end_ndvi).all():
-        return _fail(
-            context,
-            "В окне анализа нет валидных пикселей",
+            "Не удалось прочитать сцены Sentinel-2 ни на одном участке территории",
             datasets,
             period_diagnostics,
             stage="scene_read",
         )
 
+    first = chunk_records[0]
+    start_grid = first["start_grid"]
+    end_grid = first["end_grid"]
     start_transform = start_grid["transform"]
     start_crs = start_grid["crs"]
-    grid_check = _grid_differences(start_grid["info"], end_grid["info"])
-    grid_alignment = "none"
-    if not grid_check["compatibleWithoutResampling"]:
-        end_ndvi = await asyncio.to_thread(
-            reproject_to_grid,
-            end_ndvi,
-            src_transform=end_grid["transform"],
-            src_crs=end_grid["crs"],
-            dst_transform=start_transform,
-            dst_crs=start_crs,
-            dst_shape=start_grid["shape"],
-            resampling=Resampling.bilinear,
-        )
-        grid_alignment = "end_reprojected_to_start"
-    rows, cols = start_grid["shape"]
-    start_ndvi = start_ndvi[:rows, :cols]
-    end_ndvi = end_ndvi[:rows, :cols]
+    grid_check = first["grid_check"]
+    grid_alignment = first["grid_alignment"]
 
-    valid_start = ~np.isnan(start_ndvi)
-    valid_end = ~np.isnan(end_ndvi)
-    shared_valid = valid_start & valid_end
-    total_pixels = int(shared_valid.size)
-    shared_share = float(shared_valid.mean()) if total_pixels else 0.0
-    unknown_share = float((~shared_valid).mean()) if total_pixels else 1.0
+    processed_aoi_pixels = 0
+    shared_pixels = 0
+    valid_start_pixels = 0
+    valid_end_pixels = 0
+    zones: list[dict[str, Any]] = []
+    for record in chunk_records:
+        chunk_rows = int(record["rows"])
+        chunk_cols = int(record["cols"])
+        chunk_transform = record["start_grid"]["transform"]
+        chunk_crs = record["start_grid"]["crs"]
+        chunk_aoi = (
+            np.ones((chunk_rows, chunk_cols), dtype=bool)
+            if "bbox_polygon" in aoi_source
+            else _aoi_mask(
+                aoi_geometry,
+                chunk_transform,
+                (chunk_rows, chunk_cols),
+                chunk_crs,
+            )
+        )
+        chunk_valid_start = ~np.isnan(record["start_ndvi"]) & chunk_aoi
+        chunk_valid_end = ~np.isnan(record["end_ndvi"]) & chunk_aoi
+        chunk_shared = chunk_valid_start & chunk_valid_end
+        processed_aoi_pixels += int(chunk_aoi.sum())
+        valid_start_pixels += int(chunk_valid_start.sum())
+        valid_end_pixels += int(chunk_valid_end.sum())
+        shared_pixels += int(chunk_shared.sum())
+        if not chunk_shared.any():
+            continue
+        zones.extend(
+            build_change_zones(
+                dict(
+                    zip(
+                        ("retained", "lost", "new"),
+                        detect_changes(
+                            classify_vegetation(
+                                record["start_ndvi"], threshold
+                            ),
+                            classify_vegetation(
+                                record["end_ndvi"], threshold
+                            ),
+                            valid_mask=chunk_shared,
+                        ),
+                        strict=False,
+                    )
+                ),
+                chunk_transform,
+                chunk_crs,
+                territory_name,
+                min_area_m2,
+            )
+        )
+    if failed_chunks:
+        # Часть участков не обработана: считаем полную площадь AOI по общей
+        # сетке, чтобы не занизить unknown и не завысить покрытие.
+        res_x = abs(float(start_transform.a))
+        res_y = abs(float(start_transform.e))
+        left, bottom, right, top = transform_bounds(
+            "EPSG:4326", start_crs, *bbox, densify_pts=21
+        )
+        full_cols = max(1, math.ceil((right - left) / res_x))
+        full_rows = max(1, math.ceil((top - bottom) / res_y))
+        full_transform = Affine(res_x, 0, left, 0, -res_y, top)
+        full_aoi = (
+            np.ones((full_rows, full_cols), dtype=bool)
+            if "bbox_polygon" in aoi_source
+            else _aoi_mask(
+                aoi_geometry,
+                full_transform,
+                (full_rows, full_cols),
+                start_crs,
+            )
+        )
+        total_pixels = int(full_aoi.sum())
+        bbox_pixels = int(full_aoi.size)
+    else:
+        total_pixels = processed_aoi_pixels
+        bbox_pixels = sum(
+            int(record["rows"]) * int(record["cols"])
+            for record in chunk_records
+        )
+    unknown_pixels = total_pixels - shared_pixels
+    unprocessed_aoi_pixels = max(0, total_pixels - processed_aoi_pixels)
+    shared_share = shared_pixels / total_pixels if total_pixels else 0.0
+    unknown_share = unknown_pixels / total_pixels if total_pixels else 1.0
     center_lat = (float(bbox[1]) + float(bbox[3])) / 2
     pixel_area_m2 = grid_pixel_area_m2(start_transform, start_crs, center_lat)
-    shared_pixels = int(shared_valid.sum())
-    unknown_pixels = total_pixels - shared_pixels
+    territory_area_km2 = (
+        total_pixels * pixel_area_m2 / 1_000_000.0
+        if pixel_area_m2 is not None
+        else None
+    )
+    bbox_area_km2 = (
+        bbox_pixels * pixel_area_m2 / 1_000_000.0
+        if pixel_area_m2 is not None
+        else None
+    )
     coverage = {
-        "validStart": float(valid_start.mean()) if total_pixels else 0.0,
-        "validEnd": float(valid_end.mean()) if total_pixels else 0.0,
+        "validStart": (
+            valid_start_pixels / total_pixels if total_pixels else 0.0
+        ),
+        "validEnd": valid_end_pixels / total_pixels if total_pixels else 0.0,
         "sharedValid": shared_share,
         "unknown": unknown_share,
         "totalPixels": total_pixels,
+        "bboxPixels": bbox_pixels,
+        "outsideAoiPixels": bbox_pixels - total_pixels,
+        "processedAoiPixels": processed_aoi_pixels,
+        "unprocessedAoiPixels": unprocessed_aoi_pixels,
         "sharedValidPixels": shared_pixels,
         "unknownPixels": unknown_pixels,
+        "processedChunks": len(chunk_records),
+        "totalChunks": len(chunk_records) + len(failed_chunks),
         "pixelAreaM2": pixel_area_m2,
-        "analysisAreaKm2": (
-            total_pixels * pixel_area_m2 / 1_000_000.0
+        "territoryAreaKm2": territory_area_km2,
+        "bboxAreaKm2": bbox_area_km2,
+        "analysisAreaKm2": territory_area_km2,
+        "processedAreaKm2": (
+            processed_aoi_pixels * pixel_area_m2 / 1_000_000.0
+            if pixel_area_m2 is not None
+            else None
+        ),
+        "unprocessedAreaKm2": (
+            unprocessed_aoi_pixels * pixel_area_m2 / 1_000_000.0
             if pixel_area_m2 is not None
             else None
         ),
@@ -694,8 +1065,9 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
             else None
         ),
         "areaNote": (
-            "Площадь покрытия рассчитана по пикселям сетки расчёта; "
-            "площади зон считает PostGIS после фильтрации min_area."
+            "Доли покрытия считаются относительно административной границы "
+            "территории; необработанные участки входят в unknown. "
+            "Площади зон считает PostGIS после фильтрации min_area."
         ),
     }
     start_scene_ids = [item.get("sceneId") for item in start_ok]
@@ -751,6 +1123,29 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
             + "; ".join(str(item) for item in grid_check["reasons"])
             + "."
         )
+    if "bbox_polygon" in aoi_source:
+        limitations.append(
+            "Административная граница территории не получена: использован "
+            "прямоугольник bbox, результат может включать пригороды."
+        )
+    limitations.append(
+        "Вне границы запрошенной территории изменения не оценивались."
+    )
+    if any(
+        item.get("windowDays") == EXPANDED_WINDOW_DAYS
+        for item in [*start_ok, *end_ok]
+    ):
+        limitations.append(
+            "Для покрытия окно поиска сцен расширено до ±"
+            f"{EXPANDED_WINDOW_DAYS} дней внутри того же сезона; "
+            "фактические даты указаны в результате."
+        )
+    if failed_chunks:
+        limitations.append(
+            f"Не обработано участков: {len(failed_chunks)} из "
+            f"{len(chunk_records) + len(failed_chunks)}; их площадь учтена "
+            "как unknown, изменения там не оценивались."
+        )
 
     quality_reasons: list[str] = []
     if shared_share < QUALITY_MIN_COVERAGE:
@@ -775,6 +1170,21 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
 
     diagnostics: dict[str, Any] = {
         "bbox": bbox,
+        "aoi": {
+            "bbox": bbox,
+            "source": aoi_source,
+            "geometryType": (
+                aoi_geometry.get("type")
+                if isinstance(aoi_geometry, dict)
+                else None
+            ),
+            "areaKm2": territory_area_km2,
+            "bboxAreaKm2": bbox_area_km2,
+            "requestedName": territory_name,
+            "parent": (aoi.get("requestedTerritory") or {}).get("parent"),
+            "displayName": territory_display,
+        },
+        "territorySelection": territory_info,
         "requestedPeriod": {
             "start": start_date.isoformat(),
             "end": end_date.isoformat(),
@@ -819,6 +1229,11 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
             "alignment": grid_alignment,
             "note": "Пиксельное сравнение выполняется на сетке начала.",
         },
+        "chunks": {
+            "processed": len(chunk_records),
+            "failed": len(failed_chunks),
+            "spanDeg": ANALYSIS_CHUNK_SPAN_DEG,
+        },
         "classification": {
             "ndviThreshold": threshold,
             "minAreaM2": min_area_m2,
@@ -858,20 +1273,7 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
             stage="coverage",
         )
 
-    start_class = classify_vegetation(start_ndvi, threshold)
-    end_class = classify_vegetation(end_ndvi, threshold)
-    retained, lost, new = detect_changes(
-        start_class,
-        end_class,
-        valid_mask=shared_valid,
-    )
-    zones = build_change_zones(
-        {"retained": retained, "lost": lost, "new": new},
-        start_transform,
-        start_crs,
-        territory_name,
-        min_area_m2,
-    )
+    # Зоны уже собраны по участкам (с AOI-маской).
     if not zones:
         context.update(
             {
@@ -892,6 +1294,9 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
                 "ndvi_threshold": threshold,
                 "min_area_m2": min_area_m2,
                 "bbox": bbox,
+                "aoi_geometry": aoi_geometry,
+                "aoi_source": aoi_source,
+                "aoi_area_km2": territory_area_km2,
             }
         )
         return {
@@ -935,6 +1340,9 @@ async def analyst_node(state: dict[str, Any]) -> dict[str, Any]:
             "min_area_m2": min_area_m2,
             "bbox": bbox,
             "coverage": coverage,
+            "aoi_geometry": aoi_geometry,
+            "aoi_source": aoi_source,
+            "aoi_area_km2": territory_area_km2,
         }
     )
     return {

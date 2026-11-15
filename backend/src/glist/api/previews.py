@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import uuid
 from io import BytesIO
 from typing import Any, Literal
@@ -112,10 +113,31 @@ async def _read_band(
     return data if data.size else None
 
 
+def _preview_shape(
+    bbox: tuple[float, float, float, float],
+    max_side: int = 1400,
+) -> tuple[int, int]:
+    """Размер preview с сохранением пропорций (без чтения города в 10 м)."""
+    west, south, east, north = bbox
+    lat = math.radians((south + north) / 2.0)
+    width_m = (east - west) * 111320.0 * max(math.cos(lat), 0.01)
+    height_m = (north - south) * 110540.0
+    if width_m <= 0 or height_m <= 0:
+        return max_side, max_side
+    if width_m >= height_m:
+        cols = max_side
+        rows = max(1, round(max_side * height_m / width_m))
+    else:
+        rows = max_side
+        cols = max(1, round(max_side * width_m / height_m))
+    return rows, cols
+
+
 async def _scene_rgb(
     scene: dict[str, Any],
     bbox: tuple[float, float, float, float],
     semaphore: asyncio.Semaphore,
+    shape: tuple[int, int],
 ) -> list[np.ndarray] | None:
     """RGB-каналы одной сцены с SCL-маской (None, если сцена не прочитана)."""
     red_url = scene.get("redUrl")
@@ -128,10 +150,11 @@ async def _scene_rgb(
     green_scale, green_offset = _band_scaling(scene, "green", _REFLECTANCE_SCALE)
     blue_scale, blue_offset = _band_scaling(scene, "blue", _REFLECTANCE_SCALE)
     scl_scale, scl_offset = _band_scaling(scene, "scl", 1.0)
-    red = await _read_band(str(red_url), bbox, red_scale, None, semaphore, red_offset)
+    red = await _read_band(
+        str(red_url), bbox, red_scale, shape, semaphore, red_offset
+    )
     if red is None:
         return None
-    shape = (int(red.shape[0]), int(red.shape[1]))
     green = await _read_band(
         str(green_url), bbox, green_scale, shape, semaphore, green_offset
     )
@@ -158,8 +181,9 @@ async def _rgb_composite(
     bbox: tuple[float, float, float, float],
 ) -> np.ndarray | None:
     semaphore = asyncio.Semaphore(_BAND_CONCURRENCY)
+    shape = _preview_shape(bbox)
     results = await asyncio.gather(
-        *(_scene_rgb(scene, bbox, semaphore) for scene in scenes)
+        *(_scene_rgb(scene, bbox, semaphore, shape) for scene in scenes)
     )
     channels: list[list[np.ndarray]] = [[], [], []]
     for scene_channels in results:
@@ -312,13 +336,14 @@ async def _scene_valid(
     scene: dict[str, Any],
     bbox: tuple[float, float, float, float],
     semaphore: asyncio.Semaphore,
+    shape: tuple[int, int],
 ) -> np.ndarray | None:
     scl_url = scene.get("sclUrl")
     if not scl_url:
         return None
     scl_scale, scl_offset = _band_scaling(scene, "scl", 1.0)
     scl = await _read_band(
-        str(scl_url), bbox, scl_scale, None, semaphore, scl_offset
+        str(scl_url), bbox, scl_scale, shape, semaphore, scl_offset
     )
     if scl is None:
         return None
@@ -328,11 +353,13 @@ async def _scene_valid(
 async def _period_valid_mask(
     scenes: list[dict[str, Any]],
     bbox: tuple[float, float, float, float],
+    shape: tuple[int, int] | None = None,
 ) -> np.ndarray | None:
     """Валидные пиксели периода (SCL) — та же маска, что у композита."""
     semaphore = asyncio.Semaphore(_BAND_CONCURRENCY)
+    target = shape or _preview_shape(bbox)
     results = await asyncio.gather(
-        *(_scene_valid(scene, bbox, semaphore) for scene in scenes)
+        *(_scene_valid(scene, bbox, semaphore, target) for scene in scenes)
     )
     masks = [item for item in results if item is not None]
     if not masks:
@@ -349,8 +376,9 @@ async def _unknown_rgba(
     bbox: tuple[float, float, float, float],
 ) -> np.ndarray | None:
     """RGBA-маска unknown: невалидно хотя бы на одной дате (отдельный слой)."""
-    start_valid = await _period_valid_mask(start_scenes, bbox)
-    end_valid = await _period_valid_mask(end_scenes, bbox)
+    shape = _preview_shape(bbox)
+    start_valid = await _period_valid_mask(start_scenes, bbox, shape)
+    end_valid = await _period_valid_mask(end_scenes, bbox, shape)
     if start_valid is None or end_valid is None:
         return None
     rows = min(int(start_valid.shape[0]), int(end_valid.shape[0]))

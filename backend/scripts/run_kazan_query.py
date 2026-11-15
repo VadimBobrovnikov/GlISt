@@ -17,7 +17,7 @@ def main() -> None:
     run_id = created.json()["run"]["id"]
     print("RUN_ID", run_id, flush=True)
 
-    deadline = time.time() + 480
+    deadline = time.time() + 1500
     last_status: str | None = None
     status = ""
     while time.time() < deadline:

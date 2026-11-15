@@ -10,6 +10,7 @@ Endpoints:
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from datetime import datetime
 from typing import Any
@@ -26,8 +27,10 @@ from glist.config import Settings, get_settings
 from glist.db.models import AnalysisRun, Query, SettingsProfile, User
 from glist.services.queue_service import enqueue_run
 from glist.services.run_service import STATUS_WAITING
+from glist.tools.geocode import geocode_territory
 
 router = APIRouter(prefix="/api/v1")
+logger = logging.getLogger(__name__)
 
 
 class QueryCreate(BaseModel):
@@ -36,6 +39,16 @@ class QueryCreate(BaseModel):
     text: str = Field(min_length=3, max_length=1000)
     parentQueryId: uuid.UUID | None = None
     mode: str | None = None
+    territory: dict[str, Any] | None = None
+
+
+class TerritoryResolveRequest(BaseModel):
+    """Запрос предварительного выбора территории (район + город)."""
+
+    text: str = Field(min_length=3, max_length=1000)
+    name: str | None = None
+    parent: str | None = None
+    type: str | None = None
 
 
 class RunSummary(BaseModel):
@@ -101,6 +114,135 @@ async def _ensure_settings_profile(
 
 
 
+@router.post("/territories/resolve", tags=["queries"])
+async def resolve_territory(  # noqa: B008
+    body: TerritoryResolveRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),  # noqa: B008
+) -> dict[str, Any]:
+    """Предварительно выбирает объект до запуска анализа.
+
+    Для района возвращает только объект внутри указанного города; если
+    граница не найдена или объектов несколько — статус и кандидаты.
+    """
+    from glist.agents.researcher import extract_territory_params
+
+    if body.name:
+        requested: dict[str, Any] = {
+            "name": body.name.strip(),
+            "normalizedName": body.name.strip().lower(),
+            "parent": body.parent.strip() if body.parent else None,
+            "type": body.type or ("district" if body.parent else "city"),
+        }
+    else:
+        extracted = await extract_territory_params(body.text)
+        if extracted is None:
+            return {
+                "status": "extraction_failed",
+                "reason": "extraction_failed",
+                "message": (
+                    "Не удалось извлечь название территории из запроса. "
+                    "Уточните запрос или выделите участок на карте."
+                ),
+                "requested": {"name": None, "parent": None, "type": None},
+                "candidates": [],
+            }
+        requested = dict(extracted)
+
+    try:
+        payload = await geocode_territory(
+            str(requested.get("name") or ""),
+            parent=requested.get("parent"),
+            object_type=requested.get("type"),
+        )
+    except Exception as exc:  # noqa: BLE001 — сбой геокодера ≠ «объект не найден»
+        logger.warning("Territory resolve failed: %s", exc)
+        return {
+            "status": "geocoder_error",
+            "reason": "geocoder_error",
+            "message": (
+                "Сервис геокодирования недоступен или ограничил запросы "
+                f"({exc}). Можно выбрать участок на карте вручную."
+            ),
+            "requested": requested,
+            "candidates": [],
+        }
+    if payload is None:
+        name = str(requested.get("name") or "")
+        parent = requested.get("parent")
+        if not name.strip() or name == "Территория запроса":
+            message = (
+                "Не удалось извлечь название города из запроса. Уточните "
+                "запрос или выберите участок на карте."
+            )
+            reason = "empty_territory"
+        elif parent:
+            message = f"Район «{name}» в «{parent}» не найден."
+            reason = "district_not_found"
+        else:
+            message = f"Объект «{name}» не найден."
+            reason = "not_found"
+        return {
+            "status": "not_found",
+            "reason": reason,
+            "message": message,
+            "requested": requested,
+            "candidates": [],
+        }
+    candidates = [
+        {
+            "name": item.get("name"),
+            "displayName": item.get("displayName"),
+            "kind": item.get("kind"),
+            "city": item.get("city"),
+            "parent": item.get("parent"),
+            "addresstype": item.get("addresstype"),
+            "bbox": item.get("bbox"),
+            "geometry": item.get("geometry"),
+            "pointOnly": item.get("pointOnly"),
+        }
+        for item in (payload.get("candidates") or [])
+        if isinstance(item, dict) and item.get("bbox")
+    ]
+    selected = {
+        "name": payload.get("name"),
+        "displayName": payload.get("displayName"),
+        "kind": payload.get("kind"),
+        "city": payload.get("city"),
+        "addresstype": payload.get("addresstype"),
+        "bbox": payload.get("bbox"),
+        "geometry": payload.get("geometry"),
+        "parent": requested.get("parent"),
+        "type": requested.get("type") or "place",
+        "pointOnly": payload.get("pointOnly"),
+        "source": "geocoding",
+    }
+    if not isinstance(selected.get("geometry"), dict):
+        status = "point_only" if selected.get("pointOnly") else "boundary_missing"
+        return {
+            "status": status,
+            "reason": status,
+            "message": (
+                f"У объекта «{selected.get('name')}» найдена только точка, "
+                "границы нет. Можно выбрать участок на карте вручную."
+                if status == "point_only"
+                else f"У объекта «{selected.get('name')}» не найдена граница. "
+                "Можно выбрать участок на карте вручную."
+            ),
+            "requested": requested,
+            "selected": selected,
+            "candidates": candidates,
+        }
+    status = "ambiguous" if payload.get("ambiguous") else "resolved"
+    return {
+        "status": status,
+        "reason": "ambiguous" if status == "ambiguous" else "ok",
+        "message": None,
+        "requested": requested,
+        "selected": selected,
+        "candidates": candidates,
+    }
+
+
 @router.post(
     "/queries",
     status_code=status.HTTP_201_CREATED,
@@ -130,6 +272,9 @@ async def create_query(  # noqa: B008
         query_kind="follow_up" if body.parentQueryId else "primary",
         parent_query_id=body.parentQueryId,
         status=STATUS_WAITING,
+        extracted=(
+            {"territory": body.territory} if body.territory is not None else None
+        ),
     )
     session.add(query)
     await session.flush()
