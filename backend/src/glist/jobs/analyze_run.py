@@ -29,6 +29,12 @@ from glist.db.models import (
     SettingsProfile,
 )
 from glist.db.session import get_session_ctx
+from glist.scenarios.registry import ScenarioUnavailable, run_scenario
+from glist.scenarios.types import (
+    DEFAULT_ANALYSIS_TYPE,
+    AnalysisType,
+    parse_analysis_type,
+)
 from glist.services.run_service import (
     STATUS_COMPLETED,
     STATUS_ERROR,
@@ -105,6 +111,7 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
         query_id = ""
         language = "ru"
         analysis_context: dict[str, Any] = {}
+        analysis_type: AnalysisType = DEFAULT_ANALYSIS_TYPE
 
         # Переводим запуск «в обработке» и читаем текст запроса для графа.
         async with get_session_ctx() as session:
@@ -133,6 +140,10 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
                     analysis_context["min_area_m2"] = min_area
             run.status = STATUS_PROCESSING
             run.started_at = datetime.now(UTC)
+            # Сценарий берём из записи запуска (он скопирован из запроса при
+            # создании) и передаём в состояние графа без домысливания.
+            analysis_type = parse_analysis_type(run.analysis_type) or DEFAULT_ANALYSIS_TYPE
+            analysis_context["analysis_type"] = analysis_type.value
             await session.commit()
 
         initial_state: AgentState = {
@@ -152,9 +163,12 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
             "messages": [],
         }
 
-        # Узлы графа используют MockLLMProvider напрямую — Ollama не требуется.
-        graph = build_graph()
-        graph_result: dict[str, Any] = await graph.ainvoke(initial_state)
+        if analysis_type == AnalysisType.VEGETATION_CHANGE:
+            # Базовый сценарий: прежний граф NDVI без изменений поведения.
+            graph = build_graph()
+            graph_result: dict[str, Any] = await graph.ainvoke(initial_state)
+        else:
+            graph_result = await _run_scenario_pipeline(analysis_type, initial_state)
 
         validation = _as_dict(graph_result.get("validation"))
         passed = str(validation.get("outcome") or "failed") == "passed"
@@ -235,6 +249,59 @@ async def analyze_run(ctx: dict[str, Any], run_id: str) -> dict[str, Any]:
 
     finally:
         await publisher.close()
+
+
+async def _run_scenario_pipeline(
+    analysis_type: AnalysisType,
+    state: AgentState,
+) -> dict[str, Any]:
+    """Выполняет сценарий (не растительность) и приводит результат к форме графа.
+
+    Обработчик сценария обязан вернуть словарь с ключами ``context``,
+    ``analysis_result``, ``visualization``, ``validation`` — как состояние
+    графа LangGraph. Отключённый или нереализованный сценарий даёт явный
+    технический отказ, а не результат анализа растительности.
+    """
+    try:
+        return await run_scenario(analysis_type, dict(state))
+    except ScenarioUnavailable as exc:
+        reason = str(exc)
+    except Exception as exc:  # noqa: BLE001 — сбой сценария не должен выдавать зелень
+        logger.exception("Ошибка сценария %s", analysis_type)
+        reason = f"Ошибка выполнения сценария: {exc}"
+
+    context = _as_dict(state.get("context"))
+    context["analysis_failure"] = {
+        "category": "analysis_error",
+        "stage": "scenario_dispatch",
+        "message": reason,
+        "technicalSuccess": False,
+        "dataQualityAssessed": False,
+    }
+    context["analysis_diagnostics"] = {
+        "analysisType": analysis_type.value,
+        "technicalSuccess": False,
+        "interpretability": {"status": "not_evaluated", "reasons": [reason]},
+        "limitations": [reason],
+        "failure": context["analysis_failure"],
+    }
+    return {
+        "run_id": state.get("run_id"),
+        "context": context,
+        "analysis_result": {
+            "mode": "single",
+            "summary_text": f"Технический сбой: {reason}",
+            "explanation_text": f"Технический сбой: {reason}",
+        },
+        "visualization": {"summary_text": f"Технический сбой: {reason}"},
+        "validation": {
+            "outcome": "failed",
+            "category": "analysis_error",
+            "reasons": [reason],
+        },
+        "messages": [f"Сценарий {analysis_type.value}: {reason}"],
+        "errors": [reason],
+    }
 
 
 async def _save_result(

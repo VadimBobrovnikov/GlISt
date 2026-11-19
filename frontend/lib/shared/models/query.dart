@@ -1,3 +1,4 @@
+import 'analysis_type.dart';
 import 'enums.dart';
 import 'json_utils.dart';
 import 'run.dart';
@@ -16,6 +17,7 @@ class QuerySummary {
     this.purgeNoticeAt,
     this.isPinned = false,
     this.createdAt,
+    this.analysisType = AnalysisType.vegetation,
   });
 
   /// Идентификатор запроса.
@@ -51,6 +53,9 @@ class QuerySummary {
   /// Время создания запроса.
   final DateTime? createdAt;
 
+  /// Сценарий анализа, выбранный при создании запроса.
+  final AnalysisType analysisType;
+
   /// Создаёт модель из JSON-объекта контракта.
   factory QuerySummary.fromJson(Map<String, dynamic> json) {
     return QuerySummary(
@@ -65,6 +70,7 @@ class QuerySummary {
       purgeNoticeAt: JsonUtils.asDateTime(json['purgeNoticeAt']),
       isPinned: JsonUtils.asBoolOr(json['isPinned'], false),
       createdAt: JsonUtils.asDateTime(json['createdAt']),
+      analysisType: AnalysisType.fromWire(json['analysisType']),
     );
   }
 }

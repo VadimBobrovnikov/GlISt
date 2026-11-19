@@ -40,6 +40,9 @@ class QueryCreate(BaseModel):
     parentQueryId: uuid.UUID | None = None
     mode: str | None = None
     territory: dict[str, Any] | None = None
+    # Сценарий выбирает пользователь (карточка) — обязательно явно, чтобы
+    # запрос не уходил молча в анализ растительности.
+    analysisType: str | None = None
 
 
 class TerritoryResolveRequest(BaseModel):
@@ -55,6 +58,7 @@ class RunSummary(BaseModel):
     id: uuid.UUID
     status: str
     createdAt: datetime
+    analysisType: str = "vegetation_change"
 
 
 class QuerySummary(BaseModel):
@@ -63,6 +67,7 @@ class QuerySummary(BaseModel):
     status: str
     createdAt: datetime
     lastRunId: uuid.UUID | None = None
+    analysisType: str = "vegetation_change"
 
 
 class QueryCreated(BaseModel):
@@ -260,6 +265,37 @@ async def create_query(  # noqa: B008
     settings = get_settings()
     settings_hash = "default_settings_hash"
 
+    # Тип анализа задаётся явно. Неизвестный тип и отключённый сценарий
+    # отклоняются — подмены на анализ растительности быть не должно.
+    from glist.scenarios.registry import capabilities, is_enabled
+    from glist.scenarios.types import (
+        DEFAULT_ANALYSIS_TYPE,
+        analysis_type_label,
+        parse_analysis_type,
+    )
+
+    analysis_type = DEFAULT_ANALYSIS_TYPE
+    if body.analysisType is not None:
+        parsed = parse_analysis_type(body.analysisType)
+        if parsed is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Неизвестный тип анализа: "
+                    f"{body.analysisType!r}. Доступны: "
+                    + ", ".join(item["analysisType"] for item in capabilities(settings))
+                ),
+            )
+        analysis_type = parsed
+    if not is_enabled(analysis_type, settings):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Сценарий «{analysis_type_label(analysis_type)}» пока недоступен. "
+                "Анализ растительности доступен всегда."
+            ),
+        )
+
     # Заглушка аутентификации и профиль настроек должны существовать до вставки
     # query/analysis_run: на них ссылаются FK.
     await _ensure_user(session, user_id, current_user)
@@ -271,6 +307,7 @@ async def create_query(  # noqa: B008
         language="ru",
         query_kind="follow_up" if body.parentQueryId else "primary",
         parent_query_id=body.parentQueryId,
+        analysis_type=analysis_type.value,
         status=STATUS_WAITING,
         extracted=(
             {"territory": body.territory} if body.territory is not None else None
@@ -281,13 +318,16 @@ async def create_query(  # noqa: B008
 
     run_id = uuid.uuid4()
     trace_id = uuid.uuid4().hex
-    params_hash_input = f"{query_text}:{body.parentQueryId or ''}:{body.mode or ''}"
+    params_hash_input = (
+        f"{analysis_type.value}:{query_text}:{body.parentQueryId or ''}:{body.mode or ''}"
+    )
     params_hash = hashlib.sha256(params_hash_input.encode()).hexdigest()
 
     run = AnalysisRun(
         id=run_id,
         query_id=query.id,
         parent_run_id=None,
+        analysis_type=analysis_type.value,
         status=STATUS_WAITING,
         trace_id=trace_id,
         settings_hash=settings_hash,
@@ -320,11 +360,13 @@ async def create_query(  # noqa: B008
             status=query.status,
             createdAt=query.created_at,
             lastRunId=run.id,
+            analysisType=query.analysis_type,
         ),
         run=RunSummary(
             id=run.id,
             status=run.status,
             createdAt=run.created_at,
+            analysisType=run.analysis_type,
         ),
     )
 
@@ -361,9 +403,18 @@ async def list_queries(  # noqa: B008
                 "status": last_run.status if last_run is not None else query.status,
                 "createdAt": query.created_at,
                 "lastRunId": last_run.id if last_run is not None else None,
+                "analysisType": query.analysis_type,
             }
         )
     return {"items": history}
+
+
+@router.get("/capabilities", tags=["queries"])
+async def get_capabilities() -> dict[str, Any]:
+    """Доступные сценарии анализа: включённые и честно отключённые."""
+    from glist.scenarios.registry import capabilities
+
+    return {"analysisTypes": capabilities()}
 
 
 @router.get("/queries/{queryId}", tags=["queries"])
@@ -396,4 +447,5 @@ async def get_query(  # noqa: B008
         "status": last_run.status if last_run is not None else query.status,
         "createdAt": query.created_at,
         "lastRunId": last_run.id if last_run is not None else None,
+        "analysisType": query.analysis_type,
     }

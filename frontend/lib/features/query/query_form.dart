@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../../core/api_client.dart';
 import '../../core/api_provider.dart';
 import '../../core/app_theme.dart';
+import '../../shared/models/analysis_type.dart';
 import '../../shared/models/models.dart';
 import '../history/history_view.dart';
 import '../progress/progress_view.dart';
@@ -26,6 +27,53 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
   bool _submitting = false;
   String? _error;
 
+  /// Выбранный сценарий: задаётся карточкой и передаётся в API явно.
+  AnalysisType _scenario = AnalysisType.vegetation;
+
+  /// Доступность сценариев на сервере (`analysisType → enabled`).
+  Map<String, bool> _capabilities = const <String, bool>{};
+
+  @override
+  void initState() {
+    super.initState();
+  }
+
+  Future<void> _loadCapabilities() async {
+    if (!mounted) {
+      return;
+    }
+    final ApiClient client;
+    try {
+      client = ApiScope.of(context);
+    } on FlutterError {
+      // В окружении без провайдера (смок-тесты) список недоступен.
+      return;
+    }
+    try {
+      final Map<String, bool> capabilities = await client.fetchCapabilities();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _capabilities = capabilities;
+      });
+    } on ApiException {
+      // Список сценариев необязателен: при сбое остаётся анализ растительности.
+    }
+  }
+
+  /// Доступность сценария: список запрашивается только при выборе карточки,
+  /// чтобы не делать сетевой запрос на старте экрана.
+  Future<bool> _isScenarioEnabled(AnalysisType type) async {
+    if (type == AnalysisType.vegetation) {
+      return true;
+    }
+    if (!_capabilities.containsKey(type.wireValue)) {
+      await _loadCapabilities();
+    }
+    return _capabilities[type.wireValue] == true;
+  }
+
   @override
   void dispose() {
     _controller.dispose();
@@ -40,6 +88,37 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
         _error = null;
       });
     }
+  }
+
+  /// Выбор карточки: сценарий фиксируется явно, недоступный — не подменяется.
+  Future<void> _selectTemplate(_TemplateSpec spec) async {
+    if (!await _isScenarioEnabled(spec.analysisType)) {
+      if (!mounted) {
+        return;
+      }
+      await showDialog<void>(
+        context: context,
+        builder: (BuildContext dialogContext) => AlertDialog(
+          title: const Text('Сценарий пока недоступен'),
+          content: Text(
+            '«${spec.title}» ещё не включён на сервере. Анализ растительности '
+            'вместо него не запускается — выберите другую карточку или '
+            'дождитесь включения сценария.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Понятно'),
+            ),
+          ],
+        ),
+      );
+      return;
+    }
+    setState(() {
+      _scenario = spec.analysisType;
+    });
+    _applyTemplate(spec.query);
   }
 
   void _handleTextChanged(String value) {
@@ -69,6 +148,7 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
         context,
         client,
         text,
+        scenarioLabel: _scenario.label,
       );
       if (!mounted) {
         return;
@@ -82,6 +162,7 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
       final QueryCreated created = await client.createQuery(
         text: text,
         territory: territory,
+        analysisType: _scenario,
       );
       if (!mounted) {
         return;
@@ -258,6 +339,19 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
               style: const TextStyle(color: AppColors.lost, fontSize: 13),
             ),
           ],
+          const SizedBox(height: 12),
+          Row(
+            children: <Widget>[
+              const Icon(Icons.tune, size: 16, color: AppColors.muted),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Сценарий: ${_scenario.label}',
+                  style: const TextStyle(fontSize: 13, color: AppColors.muted),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 16),
           FilledButton(
             onPressed: _submitting
@@ -306,7 +400,7 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
                   width: cardWidth,
                   child: _TemplateCard(
                     spec: spec,
-                    onTap: () => _applyTemplate(spec.query),
+                    onTap: () => unawaited(_selectTemplate(spec)),
                   ),
                 ),
               )
@@ -323,12 +417,16 @@ class _TemplateSpec {
     required this.title,
     required this.subtitle,
     required this.query,
+    required this.analysisType,
   });
 
   final IconData icon;
   final String title;
   final String subtitle;
   final String query;
+
+  /// Сценарий, который включает эта карточка (передаётся в API явно).
+  final AnalysisType analysisType;
 }
 
 const List<_TemplateSpec> _templates = <_TemplateSpec>[
@@ -337,18 +435,21 @@ const List<_TemplateSpec> _templates = <_TemplateSpec>[
     title: 'Изменение растительности',
     subtitle: 'Как меняются зелёные зоны',
     query: 'Как изменилась площадь зелёных зон Москвы за 5 лет?',
+    analysisType: AnalysisType.vegetation,
   ),
   _TemplateSpec(
     icon: Icons.water_drop_outlined,
     title: 'Зоны затопления',
-    subtitle: 'Оценка водных территорий',
-    query: 'Покажи зоны затопления в Подмосковье за 2023 год',
+    subtitle: 'Временная вода на дату события',
+    query: 'Покажи зоны затопления в Казани на 5 апреля 2026 года',
+    analysisType: AnalysisType.flood,
   ),
   _TemplateSpec(
     icon: Icons.apartment_outlined,
     title: 'Анализ застройки',
-    subtitle: 'Динамика городской среды',
-    query: 'Как изменилась застройка центра Казани за 3 года?',
+    subtitle: 'Динамика застроенных поверхностей',
+    query: 'Как изменилась застройка Казани за 3 года?',
+    analysisType: AnalysisType.builtUp,
   ),
 ];
 

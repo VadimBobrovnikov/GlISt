@@ -164,7 +164,10 @@ class _HistoryScreenState extends State<HistoryScreen> {
                           ),
                           const SizedBox(height: 6),
                           Text(
-                            _formatDate(item.createdAt),
+                            '${item.analysisType.label} · '
+                            '${_formatDate(item.createdAt)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                               fontSize: 12,
                               color: AppColors.muted,

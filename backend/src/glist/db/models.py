@@ -67,6 +67,13 @@ class Query(SQLModel, table=True):
     text: str = Field(nullable=False)
     language: str = Field(nullable=False)
     query_kind: str = Field(nullable=False)
+    # Явный сценарий анализа: старые записи без значения = растительность.
+    analysis_type: str = Field(
+        default="vegetation_change",
+        nullable=False,
+        max_length=32,
+        sa_column_kwargs={"server_default": "vegetation_change"},
+    )
     parent_query_id: uuid.UUID | None = Field(default=None, foreign_key="query.id")
     extracted: dict[str, Any] | None = Field(default=None, sa_type=JSONB)
     status: str = Field(nullable=False)
@@ -77,6 +84,10 @@ class Query(SQLModel, table=True):
         CheckConstraint(f"status IN ({_STATUSES_SQL})", name="query_status_check"),
         CheckConstraint("language IN ('ru', 'en')", name="query_language_check"),
         CheckConstraint("query_kind IN ('primary', 'follow_up')", name="query_kind_check"),
+        CheckConstraint(
+            "analysis_type IN ('vegetation_change', 'built_up_change', 'flood_extent')",
+            name="query_analysis_type_check",
+        ),
         CheckConstraint("length(text) between 3 and 1000", name="query_text_length_check"),
         Index("ix_query_user_created_at", "user_id", "created_at"),
         Index("ix_query_parent_query_id", "parent_query_id"),
@@ -118,6 +129,14 @@ class AnalysisRun(SQLModel, table=True):
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     query_id: uuid.UUID = Field(foreign_key="query.id", nullable=False)
     parent_run_id: uuid.UUID | None = Field(default=None, foreign_key="analysis_run.id")
+    # Сценарий запуска; дублируется из запроса, чтобы воркер не зависел от JOIN
+    # и не мог незаметно подменить сценарий.
+    analysis_type: str = Field(
+        default="vegetation_change",
+        nullable=False,
+        max_length=32,
+        sa_column_kwargs={"server_default": "vegetation_change"},
+    )
     reused_result_id: uuid.UUID | None = Field(
         default=None,
         sa_column_args=[
@@ -151,6 +170,10 @@ class AnalysisRun(SQLModel, table=True):
     __table_args__ = (
         CheckConstraint(f"status IN ({_STATUSES_SQL})", name="analysis_run_status_check"),
         CheckConstraint("attempt_count between 0 and 1", name="analysis_run_attempt_count_check"),
+        CheckConstraint(
+            "analysis_type IN ('vegetation_change', 'built_up_change', 'flood_extent')",
+            name="analysis_run_analysis_type_check",
+        ),
         CheckConstraint(
             "rejection_category IS NULL OR rejection_category "
             "IN ('analysis_error', 'data_quality')",

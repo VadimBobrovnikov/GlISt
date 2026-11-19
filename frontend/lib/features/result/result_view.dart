@@ -394,14 +394,14 @@ class _ResultScreenState extends State<ResultScreen> {
               ],
             ),
             const SizedBox(height: 4),
-            const Text(
-              'Изменение растительности',
-              style: TextStyle(color: AppColors.muted, fontSize: 13),
+            Text(
+              result.scenarioTitle,
+              style: const TextStyle(color: AppColors.muted, fontSize: 13),
             ),
             const SizedBox(height: 24),
-            const Text(
-              'Общая динамика зелёных зон',
-              style: TextStyle(color: AppColors.muted, fontSize: 13),
+            Text(
+              result.summaryHeading,
+              style: const TextStyle(color: AppColors.muted, fontSize: 13),
             ),
             const SizedBox(height: 6),
             Row(
@@ -429,9 +429,21 @@ class _ResultScreenState extends State<ResultScreen> {
             const SizedBox(height: 24),
             const Divider(height: 1, color: AppColors.border),
             const SizedBox(height: 16),
-            _statRow(AppColors.lost, 'Потеряно', lost),
-            _statRow(AppColors.retained, 'Сохранено (не изменение)', retained),
-            _statRow(AppColors.newZone, 'Новые зоны', newZones),
+            _statRow(
+              AppColors.lost,
+              result.analysisType.shortClassLabels['lost']!,
+              lost,
+            ),
+            _statRow(
+              AppColors.retained,
+              result.analysisType.shortClassLabels['retained']!,
+              retained,
+            ),
+            _statRow(
+              AppColors.newZone,
+              result.analysisType.shortClassLabels['new']!,
+              newZones,
+            ),
             const SizedBox(height: 8),
             const Text(
               'Процент изменения = (новые − потерянные) / сумма площадей × 100%.',

@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 
+import '../shared/models/analysis_type.dart';
 import '../shared/models/models.dart';
 
 /// Скачанный файл артефакта.
@@ -84,17 +85,41 @@ class ApiClient {
     String? parentQueryId,
     String? mode,
     Map<String, dynamic>? territory,
+    AnalysisType? analysisType,
   }) async {
     final Map<String, dynamic> payload = <String, dynamic>{
       'text': text,
       'parentQueryId': ?parentQueryId,
       'mode': ?mode,
       'territory': ?territory,
+      'analysisType': ?analysisType?.wireValue,
     };
     final Response<dynamic> response = await _send(
       () => _dio.post<dynamic>('/api/v1/queries', data: payload),
     );
     return QueryCreated.fromJson(JsonUtils.asMap(response.data));
+  }
+
+  /// GET /api/v1/capabilities — какие сценарии включены на сервере.
+  ///
+  /// Возвращает соответствие `analysisType → enabled`; пустая карта означает,
+  /// что сервер не отдал список (тогда доступен только анализ растительности).
+  Future<Map<String, bool>> fetchCapabilities() async {
+    final Response<dynamic> response = await _send(
+      () => _dio.get<dynamic>('/api/v1/capabilities'),
+    );
+    final Map<String, dynamic> data = JsonUtils.asMap(response.data);
+    final List<dynamic> items = JsonUtils.asList(data['analysisTypes']);
+    final Map<String, bool> result = <String, bool>{};
+    for (final dynamic item in items) {
+      final Map<String, dynamic> map = JsonUtils.asMap(item);
+      final String id = JsonUtils.asStringOr(map['analysisType'], '');
+      if (id.isEmpty) {
+        continue;
+      }
+      result[id] = map['enabled'] == true;
+    }
+    return result;
   }
 
   /// GET /api/v1/queries — история запросов с курсорной пагинацией.

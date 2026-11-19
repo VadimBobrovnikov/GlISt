@@ -28,6 +28,10 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from glist.db.models import AnalysisResult, AnalysisRun, ChangeZone, ResultTerritory
+from glist.scenarios.types import (
+    analysis_type_label,
+    class_labels,
+)
 
 CHANGE_CLASSES = ("retained", "lost", "new")
 CLASS_LABELS = {
@@ -45,6 +49,17 @@ class ExportData:
     result: AnalysisResult
     zones: list[dict[str, Any]]
     diagnostics: dict[str, Any]
+    # Сценарий, которым получен результат: определяет подписи классов.
+    analysis_type: str = "vegetation_change"
+
+    @property
+    @property
+    def scenario_title(self) -> str:
+        return analysis_type_label(self.analysis_type)
+
+    @property
+    def scenario_labels(self) -> dict[str, str]:
+        return class_labels(self.analysis_type)
 
     @property
     def summary(self) -> str:
@@ -125,6 +140,7 @@ async def load_export_data(
         result=result_row,
         zones=zones,
         diagnostics=diagnostics,
+        analysis_type=str(run.analysis_type or "vegetation_change"),
     )
 
 
@@ -256,6 +272,7 @@ def build_pdf(data: ExportData) -> bytes:
     story: list[Any] = [
         Paragraph("GlISt — результат анализа", title_style),
         Paragraph(f"Запуск: {data.run_id}", body_style),
+        Paragraph(f"Сценарий: {data.scenario_title}", body_style),
         Spacer(1, 6),
         Paragraph("Сводка", header_style),
         Paragraph(data.summary or "Сводка отсутствует.", body_style),
@@ -263,29 +280,52 @@ def build_pdf(data: ExportData) -> bytes:
 
     net = net_change_percent(data)
     net_text = "не определён (нет площади)" if net is None else f"{net:+.2f}%"
-    story.append(
-        Paragraph(
-            "Процент изменения = (новые − потерянные) / сумма площадей × 100% = "
-            f"{net_text}.",
-            body_style,
+    if data.analysis_type == "vegetation_change":
+        story.append(
+            Paragraph(
+                "Процент изменения = (новые − потерянные) / сумма площадей × 100% = "
+                f"{net_text}.",
+                body_style,
+            )
         )
-    )
+    else:
+        story.append(
+            Paragraph(
+                "Разница площадей классов = "
+                f"{net_text}; это не оценка ущерба или опасности.",
+                body_style,
+            )
+        )
     classification = _as_dict(data.diagnostics.get("classification"))
-    story.append(
-        Paragraph(
-            "NDVI = (B08 − B04) / (B08 + B04); "
-            f"порог классификации = {classification.get('ndviThreshold', '—')}; "
-            f"мин. площадь = {classification.get('minAreaM2', '—')} м².",
-            body_style,
+    method = str(classification.get("method") or "").strip()
+    formula = str(classification.get("formula") or "").strip()
+    if method or formula:
+        story.append(
+            Paragraph(
+                f"Метод: {method or '—'}. Формула: {formula or '—'}. "
+                f"Мин. площадь = {classification.get('minAreaM2', '—')} м².",
+                body_style,
+            )
         )
-    )
+    else:
+        story.append(
+            Paragraph(
+                "NDVI = (B08 − B04) / (B08 + B04); "
+                f"порог классификации = {classification.get('ndviThreshold', '—')}; "
+                f"мин. площадь = {classification.get('minAreaM2', '—')} м².",
+                body_style,
+            )
+        )
 
     table_rows: list[list[str]] = [["Класс", "Площадь", "Полигонов"]]
     for change_class in CHANGE_CLASSES:
         item = totals[change_class]
         table_rows.append(
             [
-                CLASS_LABELS[change_class],
+                data.scenario_labels.get(
+                    change_class,
+                    CLASS_LABELS.get(change_class, change_class),
+                ),
                 format_area_km2(float(item["area_km2"])),
                 str(int(item["zones"])),
             ]

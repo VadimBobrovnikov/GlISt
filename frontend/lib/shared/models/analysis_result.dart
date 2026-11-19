@@ -1,3 +1,4 @@
+import 'analysis_type.dart';
 import 'change_enums.dart';
 import 'enums.dart';
 import 'json_utils.dart';
@@ -204,6 +205,9 @@ class AnalysisResult {
     this.diagnostics = const <String, dynamic>{},
     this.qualityLimitations = const <String>[],
     this.createdAt,
+    this.analysisType = AnalysisType.vegetation,
+    this.analysisTypeLabel = '',
+    this.classLabels = const <String, String>{},
   });
 
   /// Идентификатор результата.
@@ -266,6 +270,36 @@ class AnalysisResult {
   /// Время создания результата.
   final DateTime? createdAt;
 
+  /// Сценарий анализа, которым получен результат.
+  final AnalysisType analysisType;
+
+  /// Название сценария из API (если сервер его прислал).
+  final String analysisTypeLabel;
+
+  /// Подписи классов зон для легенды и экспорта (из API).
+  final Map<String, String> classLabels;
+
+  /// Название сценария для интерфейса.
+  String get scenarioTitle =>
+      analysisTypeLabel.isNotEmpty ? analysisTypeLabel : analysisType.label;
+
+  /// Базовый сценарий (растительность) — прежние формулировки интерфейса.
+  bool get isVegetationScenario => analysisType == AnalysisType.vegetation;
+
+  /// Заголовок сводки по классам.
+  String get summaryHeading => isVegetationScenario
+      ? 'Общая динамика зелёных зон'
+      : 'Сводка по классам сценария';
+
+  /// Подпись класса зоны с учётом сценария.
+  String classLabel(String changeClass) {
+    final String? fromApi = classLabels[changeClass];
+    if (fromApi != null && fromApi.isNotEmpty) {
+      return fromApi;
+    }
+    return analysisType.defaultClassLabels[changeClass] ?? changeClass;
+  }
+
   /// Доля общего валидного покрытия (0…1).
   double? get sharedCoverage {
     final Object? value = coverage['sharedValid'];
@@ -326,8 +360,22 @@ class AnalysisResult {
       diagnostics: JsonUtils.asMap(json['diagnostics']),
       qualityLimitations: JsonUtils.asStringList(json['qualityLimitations']),
       createdAt: JsonUtils.asDateTime(json['createdAt']),
+      analysisType: AnalysisType.fromWire(json['analysisType']),
+      analysisTypeLabel: JsonUtils.asStringOr(json['analysisTypeLabel'], ''),
+      classLabels: _stringMap(json['classLabels']),
     );
   }
+}
+
+Map<String, String> _stringMap(Object? value) {
+  final Map<String, dynamic> raw = JsonUtils.asMap(value);
+  final Map<String, String> result = <String, String>{};
+  raw.forEach((String key, dynamic item) {
+    if (item is String && item.isNotEmpty) {
+      result[key] = item;
+    }
+  });
+  return result;
 }
 
 List<double>? _bboxFromJson(Object? value) {

@@ -18,8 +18,9 @@ import '../map/map_view.dart';
 Future<Map<String, dynamic>?> chooseTerritory(
   BuildContext context,
   ApiClient client,
-  String text,
-) async {
+  String text, {
+  String? scenarioLabel,
+}) async {
   Map<String, dynamic> response;
   try {
     response = await client.resolveTerritory(text: text);
@@ -69,7 +70,10 @@ Future<Map<String, dynamic>?> chooseTerritory(
   if (status == 'resolved' && selected != null && selected['geometry'] is Map) {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (_) => TerritoryPreviewDialog(selected: selected!),
+      builder: (_) => TerritoryPreviewDialog(
+        selected: selected!,
+        scenarioLabel: scenarioLabel,
+      ),
     );
     return confirmed == true ? selected : null;
   }
@@ -263,12 +267,16 @@ class TerritoryPreviewDialog extends StatelessWidget {
     super.key,
     required this.selected,
     this.enableTiles = true,
+    this.scenarioLabel,
   });
 
   final Map<String, dynamic> selected;
 
   /// Подложка карты. Отключается в виджет-тестах, чтобы не обращаться к сети.
   final bool enableTiles;
+
+  /// Сценарий анализа, выбранный пользователем (показывается до запуска).
+  final String? scenarioLabel;
 
   @override
   Widget build(BuildContext context) {
@@ -361,6 +369,19 @@ class TerritoryPreviewDialog extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (scenarioLabel != null && scenarioLabel!.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Сценарий: $scenarioLabel',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.primary,
+                    ),
+                  ),
+                ],
                 if (meta.isNotEmpty) ...<Widget>[
                   const SizedBox(height: 2),
                   Text(

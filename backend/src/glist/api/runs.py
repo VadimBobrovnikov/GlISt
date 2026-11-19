@@ -24,6 +24,10 @@ from glist.db.models import (
     ChangeZone,
     ResultTerritory,
 )
+from glist.scenarios.types import (
+    analysis_type_label,
+    class_labels,
+)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -57,6 +61,8 @@ class Run(BaseModel):
     retentionUntil: Any | None = None
     purgeNoticeAt: Any | None = None
     createdAt: Any
+    analysisType: str = "vegetation_change"
+    analysisTypeLabel: str = ""
     stages: list[dict[str, Any]] = []
     rejections: list[dict[str, Any]] = []
 
@@ -80,6 +86,9 @@ class AnalysisResultSchema(BaseModel):
     bbox: list[float] | None = None
     coverage: dict[str, Any] = {}
     diagnostics: dict[str, Any] = {}
+    analysisType: str = "vegetation_change"
+    analysisTypeLabel: str = ""
+    classLabels: dict[str, str] = {}
     qualityLimitations: list[str] = []
     createdAt: Any = None
 
@@ -129,6 +138,8 @@ async def get_run(  # noqa: B008
         finishedAt=run.finished_at,
         attemptCount=run.attempt_count,
         rejectionCategory=run.rejection_category,
+        analysisType=run.analysis_type,
+        analysisTypeLabel=analysis_type_label(run.analysis_type),
         traceId=run.trace_id,
         settingsHash=run.settings_hash,
         paramsHash=run.params_hash,
@@ -564,6 +575,9 @@ async def get_run_result(  # noqa: B008
         bbox=bbox,
         coverage=coverage,
         diagnostics=diagnostics,
+        analysisType=run.analysis_type,
+        analysisTypeLabel=analysis_type_label(run.analysis_type),
+        classLabels=class_labels(run.analysis_type),
         qualityLimitations=quality_limitations,
         createdAt=analysis_result.created_at,
     )

@@ -704,6 +704,12 @@ class _MapViewState extends State<MapView> {
       value is num ? value.toStringAsFixed(3) : '—';
 
   String _transitionLabel(Object? value) {
+    if (value is String && value.isNotEmpty) {
+      final String? label = widget.result.classLabels[value];
+      if (label != null && label.isNotEmpty) {
+        return label;
+      }
+    }
     return switch (value) {
       'retained' => 'сохранено (не изменение)',
       'lost' => 'потеряно',
@@ -740,9 +746,21 @@ class _MapViewState extends State<MapView> {
             ),
           ),
           const SizedBox(height: 6),
-          _legendRow(ChangeClass.retained, 'Сохранившиеся', AppColors.retained),
-          _legendRow(ChangeClass.lost, 'Потерянные', AppColors.lost),
-          _legendRow(ChangeClass.newZone, 'Новые зоны', AppColors.newZone),
+          _legendRow(
+            ChangeClass.retained,
+            widget.result.analysisType.shortClassLabels['retained']!,
+            AppColors.retained,
+          ),
+          _legendRow(
+            ChangeClass.lost,
+            widget.result.analysisType.shortClassLabels['lost']!,
+            AppColors.lost,
+          ),
+          _legendRow(
+            ChangeClass.newZone,
+            widget.result.analysisType.shortClassLabels['new']!,
+            AppColors.newZone,
+          ),
           const SizedBox(height: 6),
           _unknownLegendRow(),
         ],
