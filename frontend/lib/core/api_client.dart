@@ -2,7 +2,6 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 
-import '../shared/models/analysis_type.dart';
 import '../shared/models/models.dart';
 
 /// Скачанный файл артефакта.

@@ -53,7 +53,6 @@ class ExportData:
     analysis_type: str = "vegetation_change"
 
     @property
-    @property
     def scenario_title(self) -> str:
         return analysis_type_label(self.analysis_type)
 

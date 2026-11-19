@@ -22,24 +22,41 @@ class ChangeZone {
 }
 
 /// Цвета слоёв карты из дизайн-системы.
+///
+/// Оттенки зависят от сценария: для затопления синий — постоянная вода,
+/// голубой — временное затопление; для застройки серый/оранжевый. Легенда и
+/// полигоны берут цвет из одного места, чтобы они не расходились.
 class MapColors {
   const MapColors._();
 
   /// Цвет контура зоны.
-  static Color stroke(ChangeClass changeClass) {
-    switch (changeClass) {
-      case ChangeClass.retained:
-        return AppColors.retained;
-      case ChangeClass.lost:
-        return AppColors.lost;
-      case ChangeClass.newZone:
-        return AppColors.newZone;
+  static Color stroke(ChangeClass changeClass, [AnalysisType? analysisType]) {
+    switch (analysisType) {
+      case AnalysisType.flood:
+        return switch (changeClass) {
+          ChangeClass.retained => AppColors.waterPermanent,
+          ChangeClass.lost => AppColors.waterReceded,
+          ChangeClass.newZone => AppColors.waterTemporary,
+        };
+      case AnalysisType.builtUp:
+        return switch (changeClass) {
+          ChangeClass.retained => AppColors.builtRetained,
+          ChangeClass.lost => AppColors.builtLost,
+          ChangeClass.newZone => AppColors.builtNew,
+        };
+      case AnalysisType.vegetation:
+      case null:
+        return switch (changeClass) {
+          ChangeClass.retained => AppColors.retained,
+          ChangeClass.lost => AppColors.lost,
+          ChangeClass.newZone => AppColors.newZone,
+        };
     }
   }
 
   /// Цвет заливки зоны (40% прозрачности).
-  static Color fill(ChangeClass changeClass) =>
-      stroke(changeClass).withValues(alpha: 0.4);
+  static Color fill(ChangeClass changeClass, [AnalysisType? analysisType]) =>
+      stroke(changeClass, analysisType).withValues(alpha: 0.4);
 }
 
 /// Парсит FeatureCollection зон изменений из строки GeoJSON.
@@ -329,8 +346,11 @@ class _MapViewState extends State<MapView> {
         polygons.add(
           Polygon(
             points: ring,
-            color: MapColors.fill(zone.changeClass),
-            borderColor: MapColors.stroke(zone.changeClass),
+            color: MapColors.fill(zone.changeClass, widget.result.analysisType),
+            borderColor: MapColors.stroke(
+              zone.changeClass,
+              widget.result.analysisType,
+            ),
             borderStrokeWidth: 2,
           ),
         );
@@ -749,17 +769,20 @@ class _MapViewState extends State<MapView> {
           _legendRow(
             ChangeClass.retained,
             widget.result.analysisType.shortClassLabels['retained']!,
-            AppColors.retained,
+            MapColors.stroke(
+              ChangeClass.retained,
+              widget.result.analysisType,
+            ),
           ),
           _legendRow(
             ChangeClass.lost,
             widget.result.analysisType.shortClassLabels['lost']!,
-            AppColors.lost,
+            MapColors.stroke(ChangeClass.lost, widget.result.analysisType),
           ),
           _legendRow(
             ChangeClass.newZone,
             widget.result.analysisType.shortClassLabels['new']!,
-            AppColors.newZone,
+            MapColors.stroke(ChangeClass.newZone, widget.result.analysisType),
           ),
           const SizedBox(height: 6),
           _unknownLegendRow(),

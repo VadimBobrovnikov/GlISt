@@ -430,24 +430,27 @@ class _ResultScreenState extends State<ResultScreen> {
             const Divider(height: 1, color: AppColors.border),
             const SizedBox(height: 16),
             _statRow(
-              AppColors.lost,
+              MapColors.stroke(ChangeClass.lost, result.analysisType),
               result.analysisType.shortClassLabels['lost']!,
               lost,
             ),
             _statRow(
-              AppColors.retained,
+              MapColors.stroke(ChangeClass.retained, result.analysisType),
               result.analysisType.shortClassLabels['retained']!,
               retained,
             ),
             _statRow(
-              AppColors.newZone,
+              MapColors.stroke(ChangeClass.newZone, result.analysisType),
               result.analysisType.shortClassLabels['new']!,
               newZones,
             ),
             const SizedBox(height: 8),
-            const Text(
-              'Процент изменения = (новые − потерянные) / сумма площадей × 100%.',
-              style: TextStyle(fontSize: 12, color: AppColors.muted),
+            Text(
+              result.analysisType == AnalysisType.flood
+                  ? 'Площади классов рассчитаны PostGIS по итоговым полигонам; '
+                        'глубина и ущерб не оцениваются.'
+                  : 'Процент изменения = (новые − потерянные) / сумма площадей × 100%.',
+              style: const TextStyle(fontSize: 12, color: AppColors.muted),
             ),
             const SizedBox(height: 16),
             _qualityBox(result),

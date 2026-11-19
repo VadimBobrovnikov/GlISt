@@ -5,7 +5,6 @@ import 'package:flutter/material.dart';
 import '../../core/api_client.dart';
 import '../../core/api_provider.dart';
 import '../../core/app_theme.dart';
-import '../../shared/models/analysis_type.dart';
 import '../../shared/models/models.dart';
 import '../history/history_view.dart';
 import '../progress/progress_view.dart';
@@ -29,6 +28,14 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
 
   /// Выбранный сценарий: задаётся карточкой и передаётся в API явно.
   AnalysisType _scenario = AnalysisType.vegetation;
+
+  /// Дата события в тексте (ISO, dd.mm.yyyy или «5 апреля 2026»).
+  static final RegExp _eventDatePattern = RegExp(
+    r'\b(20\d{2}-\d{2}-\d{2}|\d{1,2}\.\d{1,2}\.20\d{2}|'
+    r'\d{1,2}\s+(января|февраля|марта|апреля|мая|июня|июля|августа|'
+    r'сентября|октября|ноября|декабря)\s+20\d{2})\b',
+    caseSensitive: false,
+  );
 
   /// Доступность сценариев на сервере (`analysisType → enabled`).
   Map<String, bool> _capabilities = const <String, bool>{};
@@ -130,12 +137,32 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
   }
 
   Future<void> _submit() async {
-    final String text = _controller.text.trim();
+    String text = _controller.text.trim();
     if (text.length < 3) {
       setState(() {
         _error = 'Введите запрос не короче 3 символов';
       });
       return;
+    }
+    if (_scenario == AnalysisType.flood && !_eventDatePattern.hasMatch(text)) {
+      // Затопление краткосрочно: без даты события анализ не запускаем.
+      final DateTime? picked = await showDatePicker(
+        context: context,
+        initialDate: DateTime.now().subtract(const Duration(days: 30)),
+        firstDate: DateTime(2015, 6, 23),
+        lastDate: DateTime.now(),
+        helpText: 'Дата события затопления',
+        cancelText: 'Отмена',
+        confirmText: 'Выбрать',
+      );
+      if (!mounted || picked == null) {
+        return;
+      }
+      final String iso = '${picked.year.toString().padLeft(4, '0')}-'
+          '${picked.month.toString().padLeft(2, '0')}-'
+          '${picked.day.toString().padLeft(2, '0')}';
+      text = '$text (дата события: $iso)';
+      _applyTemplate(text);
     }
     final ApiClient client = ApiScope.of(context);
     final NavigatorState navigator = Navigator.of(context);

@@ -31,6 +31,24 @@ class AppColors {
   /// Новые зоны (жёлтый).
   static const Color newZone = Color(0xFFFACC15);
 
+  /// Затопление: постоянная вода (синий).
+  static const Color waterPermanent = Color(0xFF2563EB);
+
+  /// Затопление: вода ушла в базовый период (охра).
+  static const Color waterReceded = Color(0xFFB45309);
+
+  /// Затопление: временное затопление (голубой).
+  static const Color waterTemporary = Color(0xFF06B6D4);
+
+  /// Застройка: сохранилась (серый).
+  static const Color builtRetained = Color(0xFF6B7280);
+
+  /// Застройка: исчезла (коричневый).
+  static const Color builtLost = Color(0xFF92400E);
+
+  /// Новая застройка (оранжевый).
+  static const Color builtNew = Color(0xFFF97316);
+
   /// Фон бейджа «Завершено».
   static const Color successBg = Color(0xFFDCFCE7);
 

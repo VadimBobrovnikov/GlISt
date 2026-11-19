@@ -2,6 +2,7 @@
 library;
 
 export 'analysis_result.dart';
+export 'analysis_type.dart';
 export 'api_error.dart';
 export 'artifact.dart';
 export 'change_enums.dart';
