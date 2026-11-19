@@ -304,11 +304,14 @@ def _search_sentinel2_scenes_sync(
             continue
         green_url = _asset_href(item, "green", "B03", "b03")
         blue_url = _asset_href(item, "blue", "B02", "b02")
+        # SWIR1 (B11, 20 m) нужен сценарию застройки (NDBI); для NDVI не требуется.
+        swir16_url = _asset_href(item, "swir16", "B11", "b11")
         red_scale, red_offset = _asset_scaling(item, "red", "B04", "b04")
         green_scale, green_offset = _asset_scaling(item, "green", "B03", "b03")
         blue_scale, blue_offset = _asset_scaling(item, "blue", "B02", "b02")
         nir_scale, nir_offset = _asset_scaling(item, "nir", "B08", "b08")
         scl_scale, scl_offset = _asset_scaling(item, "scl", "SCL")
+        swir16_scale, swir16_offset = _asset_scaling(item, "swir16", "B11", "b11")
 
         properties = item.get("properties", {})
         if not isinstance(properties, dict):
@@ -343,6 +346,8 @@ def _search_sentinel2_scenes_sync(
         boa_applied = properties.get("earthsearch:boa_offset_applied")
         if isinstance(boa_applied, bool):
             scene["boa_offset_applied"] = boa_applied
+        if swir16_url:
+            scene["swir16_url"] = swir16_url
         # Ключи коррекции добавляются только при наличии метаданных: отсутствие
         # scale/offset не должно превращаться в фиктивное значение.
         for key, value in (
@@ -356,6 +361,8 @@ def _search_sentinel2_scenes_sync(
             ("nir_offset", nir_offset),
             ("scl_scale", scl_scale),
             ("scl_offset", scl_offset),
+            ("swir16_scale", swir16_scale),
+            ("swir16_offset", swir16_offset),
         ):
             if value is not None:
                 scene[key] = value

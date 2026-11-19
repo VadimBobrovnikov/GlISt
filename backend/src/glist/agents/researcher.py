@@ -21,6 +21,14 @@ logger = logging.getLogger("glist.agents.researcher")
 
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
 _YEARS = re.compile(r"(\d+)\s*(?:год|года|лет)", re.IGNORECASE)
+# Явный диапазон лет: «2019-2026», «2019–2026», «с 2019 по 2026».
+_YEAR_RANGE = re.compile(r"(20\d{2})\s*[-–—]\s*(20\d{2})")
+_YEAR_RANGE_FROM_TO = re.compile(
+    r"с\s*(20\d{2})\s*(?:по|до)\s*(20\d{2})",
+    re.IGNORECASE,
+)
+# Sentinel-2 L2A доступен с 2015 года: более ранние годы не запрашиваем.
+_EARLIEST_YEAR = 2015
 _LAST_YEAR = re.compile(
     r"(?:последн\w*|прошедш\w*)\s+год|за\s+(?:последний\s+)?год",
     re.IGNORECASE,
@@ -137,6 +145,26 @@ def _territory_from_text(query_text: str) -> dict[str, Any]:
 def _heuristic_params(query_text: str) -> dict[str, Any]:
     """Резервное извлечение параметров, если LLM вернул невалидный JSON."""
     now = datetime.now(UTC)
+    range_match = _YEAR_RANGE.search(query_text) or _YEAR_RANGE_FROM_TO.search(
+        query_text
+    )
+    if range_match is not None:
+        first_year = max(_EARLIEST_YEAR, int(range_match.group(1)))
+        last_year = int(range_match.group(2))
+        if last_year < first_year:
+            first_year, last_year = last_year, first_year
+        last_year = min(last_year, now.year)
+        start_date = date(first_year, 1, 1)
+        end_date = min(now.date(), date(last_year, 12, 31))
+        territory = _territory_from_text(query_text)
+        return {
+            "territories": [territory],
+            "period": {
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+            },
+            "analysis_type": "vegetation_change",
+        }
     match = _YEARS.search(query_text)
     if _LAST_YEAR.search(query_text) is not None:
         years = 1

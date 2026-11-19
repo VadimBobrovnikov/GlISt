@@ -187,3 +187,24 @@ async def test_researcher_rejects_empty_territory_names() -> None:
     assert context["territories"][0]["name"] == ""
     assert context["period"]["start"] == "2023-01-01"
     assert context["period"]["end"] == "2023-02-01"
+
+
+def test_heuristic_parses_explicit_year_range() -> None:
+    """Явный диапазон лет должен разбираться как есть, а не как «N лет»."""
+    period = _heuristic_params("Как изменилась застройка Казани за 2019-2026 годы?")[
+        "period"
+    ]
+    assert period["start"] == "2019-01-01"
+    assert period["end"].startswith("2026-")
+
+
+def test_heuristic_parses_from_to_range() -> None:
+    period = _heuristic_params("застройка Казани с 2021 по 2024")["period"]
+    assert period["start"] == "2021-01-01"
+    assert period["end"] == "2024-12-31"
+
+
+def test_heuristic_clamps_to_sentinel2_availability() -> None:
+    """Sentinel-2 L2A нет до 2015 года: ранние годы не запрашиваются."""
+    period = _heuristic_params("застройка Казани за 2005-2016 годы")["period"]
+    assert period["start"] == "2015-01-01"
