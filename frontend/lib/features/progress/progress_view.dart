@@ -16,6 +16,7 @@ class ProgressScreen extends StatefulWidget {
   const ProgressScreen({
     required this.runId,
     required this.queryText,
+    this.analysisType,
     super.key,
   });
 
@@ -24,6 +25,9 @@ class ProgressScreen extends StatefulWidget {
 
   /// Текст исходного запроса для отображения.
   final String queryText;
+
+  /// Сценарий запуска: определяет подпись шага анализа.
+  final AnalysisType? analysisType;
 
   @override
   State<ProgressScreen> createState() => _ProgressScreenState();
@@ -137,7 +141,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
   }
 
   int get _activeIndex {
-    final int total = _agents.length;
+    final int total = _agentsFor(widget.analysisType).length;
     final Run? run = _run;
     if (run != null &&
         (run.status == RunStatus.completed ||
@@ -275,6 +279,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
   }
 
   Widget _buildAgents() {
+    final List<_AgentSpec> agents = _agentsFor(widget.analysisType);
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         final bool narrow = constraints.maxWidth < 760;
@@ -284,7 +289,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
         return Wrap(
           spacing: 16,
           runSpacing: 16,
-          children: List<Widget>.generate(_agents.length, (int index) {
+          children: List<Widget>.generate(agents.length, (int index) {
             final _StageState state = _stageState(index);
             final double stageProgress = state == _StageState.completed
                 ? 1
@@ -294,7 +299,7 @@ class _ProgressScreenState extends State<ProgressScreen> {
             return SizedBox(
               width: cardWidth,
               child: _AgentCard(
-                spec: _agents[index],
+                spec: agents[index],
                 state: state,
                 logText: _stageLog(index, state),
                 progress: stageProgress,
@@ -352,7 +357,7 @@ const List<_AgentSpec> _agents = <_AgentSpec>[
   _AgentSpec(
     icon: Icons.insights,
     name: 'Analyst',
-    role: 'Анализ NDVI',
+    role: 'Анализ спутниковых данных',
   ),
   _AgentSpec(
     icon: Icons.layers_outlined,
@@ -365,6 +370,33 @@ const List<_AgentSpec> _agents = <_AgentSpec>[
     role: 'Проверка результата',
   ),
 ];
+
+/// Подпись шага анализа по сценарию: шаг не должен называться NDVI в
+/// запуске про застройку или затопление.
+String _analystRole(AnalysisType? analysisType) {
+  switch (analysisType) {
+    case AnalysisType.flood:
+      return 'Анализ воды (MNDWI)';
+    case AnalysisType.builtUp:
+      return 'Анализ застройки (NDBI)';
+    case AnalysisType.vegetation:
+    case null:
+      return 'Анализ NDVI';
+  }
+}
+
+List<_AgentSpec> _agentsFor(AnalysisType? analysisType) {
+  return <_AgentSpec>[
+    for (final _AgentSpec spec in _agents)
+      spec.name == 'Analyst'
+          ? _AgentSpec(
+              icon: spec.icon,
+              name: spec.name,
+              role: _analystRole(analysisType),
+            )
+          : spec,
+  ];
+}
 
 class _AgentCard extends StatelessWidget {
   const _AgentCard({

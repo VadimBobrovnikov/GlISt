@@ -199,6 +199,7 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
           builder: (_) => ProgressScreen(
             runId: created.run.id,
             queryText: text,
+            analysisType: _scenario,
           ),
         ),
       );

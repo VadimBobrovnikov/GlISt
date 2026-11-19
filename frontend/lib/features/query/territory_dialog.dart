@@ -53,6 +53,15 @@ Future<Map<String, dynamic>?> chooseTerritory(
     if (picked == null || !context.mounted) {
       return null;
     }
+    final pickedSelected = _selectedCandidate(picked);
+    if (pickedSelected != null) {
+      // Пользователь выбрал конкретный объект: его геометрия уже получена от
+      // геокодера, поэтому не запускаем повторный нечёткий поиск (он снова
+      // находил бы тот же список) — подтверждаем именно этот объект.
+      selected = pickedSelected;
+      status = 'resolved';
+      break;
+    }
     response = await client.resolveTerritory(
       text: text,
       name: picked['name']?.toString(),
@@ -139,6 +148,19 @@ Map<String, dynamic>? _selected(Map<String, dynamic> response) {
     'pointOnly': raw['pointOnly'],
     'source': raw['source'],
   };
+}
+
+Map<String, dynamic>? _selectedCandidate(Map<String, dynamic> candidate) {
+  // Кандидат пригоден без повторного поиска, только если у него есть полигон
+  // и корректный bbox: иначе объект остаётся точкой и нужен ручной выбор.
+  final geometry = _asMap(candidate['geometry']);
+  final String geometryType = (geometry['type'] ?? '').toString();
+  final bool hasPolygon =
+      geometryType == 'Polygon' || geometryType == 'MultiPolygon';
+  if (!hasPolygon || _bbox(candidate) == null) {
+    return null;
+  }
+  return _selected(<String, dynamic>{'selected': candidate});
 }
 
 List<Map<String, dynamic>> _candidates(Map<String, dynamic> response) {

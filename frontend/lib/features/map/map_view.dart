@@ -12,13 +12,27 @@ import '../../shared/models/models.dart';
 
 /// Зона изменений, извлечённая из GeoJSON.
 class ChangeZone {
-  const ChangeZone({required this.changeClass, required this.rings});
+  const ChangeZone({required this.changeClass, required this.parts});
 
   /// Класс изменений (retained / lost / new).
   final ChangeClass changeClass;
 
-  /// Кольца полигонов (внешние контуры), координаты WGS84.
-  final List<List<LatLng>> rings;
+  /// Части полигона: внешний контур и вырезы (holes).
+  final List<ChangeZonePart> parts;
+}
+
+/// Одна часть зоны: внешний контур и вырезы.
+///
+/// Вырезы рисуются как `holePointsList`: иначе «дырка» заливалась бы цветом
+/// зоны и карта показывала бы изменения там, где их нет.
+class ChangeZonePart {
+  const ChangeZonePart({required this.outer, this.holes = const <List<LatLng>>[]});
+
+  /// Внешний контур, координаты WGS84.
+  final List<LatLng> outer;
+
+  /// Внутренние контуры (вырезы).
+  final List<List<LatLng>> holes;
 }
 
 /// Цвета слоёв карты из дизайн-системы.
@@ -78,10 +92,10 @@ List<ChangeZone> parseChangeZones(String raw) {
     if (changeClass == null) {
       continue;
     }
-    final List<List<LatLng>> rings =
-        _ringsFromGeometry(JsonUtils.asMap(feature['geometry']));
-    if (rings.isNotEmpty) {
-      zones.add(ChangeZone(changeClass: changeClass, rings: rings));
+    final List<ChangeZonePart> parts =
+        _partsFromGeometry(JsonUtils.asMap(feature['geometry']));
+    if (parts.isNotEmpty) {
+      zones.add(ChangeZone(changeClass: changeClass, parts: parts));
     }
   }
   return zones;
@@ -96,17 +110,49 @@ Object? _decodeOrNull(String raw) {
 }
 
 List<List<LatLng>> _ringsFromGeometry(Map<String, dynamic> geometry) {
-  final String type = JsonUtils.asStringOr(geometry['type'], '');
-  final Object? coordinates = geometry['coordinates'];
   final List<List<LatLng>> rings = <List<LatLng>>[];
-  if (type == 'Polygon') {
-    rings.addAll(_ringsFromPolygon(coordinates));
-  } else if (type == 'MultiPolygon') {
-    for (final Object? polygon in JsonUtils.asList(coordinates)) {
-      rings.addAll(_ringsFromPolygon(polygon));
-    }
+  for (final ChangeZonePart part in _partsFromGeometry(geometry)) {
+    rings.add(part.outer);
+    rings.addAll(part.holes);
   }
   return rings;
+}
+
+/// Разбирает геометрию в части «внешний контур + вырезы».
+///
+/// Кольца внутри Polygon после первого считаются вырезами: если рисовать их
+/// как отдельные залитые полигоны, карта показывала бы изменения в «дырках».
+List<ChangeZonePart> _partsFromGeometry(Map<String, dynamic> geometry) {
+  final String type = JsonUtils.asStringOr(geometry['type'], '');
+  final Object? coordinates = geometry['coordinates'];
+  final List<ChangeZonePart> parts = <ChangeZonePart>[];
+  if (type == 'Polygon') {
+    final ChangeZonePart? part = _partFromPolygon(coordinates);
+    if (part != null) {
+      parts.add(part);
+    }
+  } else if (type == 'MultiPolygon') {
+    for (final Object? polygon in JsonUtils.asList(coordinates)) {
+      final ChangeZonePart? part = _partFromPolygon(polygon);
+      if (part != null) {
+        parts.add(part);
+      }
+    }
+  }
+  return parts;
+}
+
+ChangeZonePart? _partFromPolygon(Object? coordinates) {
+  final List<List<LatLng>> rings = _ringsFromPolygon(coordinates);
+  if (rings.isEmpty) {
+    return null;
+  }
+  return ChangeZonePart(
+    outer: rings.first,
+    holes: rings.length > 1
+        ? rings.sublist(1)
+        : const <List<LatLng>>[],
+  );
 }
 
 List<List<LatLng>> _ringsFromPolygon(Object? coordinates) {
@@ -272,10 +318,10 @@ class _MapViewState extends State<MapView> {
   List<ChangeZone> _zonesFromTerritories(List<ResultTerritory> territories) {
     final List<ChangeZone> zones = <ChangeZone>[];
     for (final ResultTerritory territory in territories) {
-      final List<List<LatLng>> rings = _ringsFromGeometry(territory.boundary);
-      if (rings.isNotEmpty) {
+      final List<ChangeZonePart> parts = _partsFromGeometry(territory.boundary);
+      if (parts.isNotEmpty) {
         zones.add(
-          ChangeZone(changeClass: _dominantClass(territory), rings: rings),
+          ChangeZone(changeClass: _dominantClass(territory), parts: parts),
         );
       }
     }
@@ -341,11 +387,15 @@ class _MapViewState extends State<MapView> {
     }
     final List<Polygon> polygons = <Polygon>[];
     for (final ChangeZone zone in zones) {
-      for (final List<LatLng> ring in zone.rings) {
-        allPoints.addAll(ring);
+      for (final ChangeZonePart part in zone.parts) {
+        allPoints.addAll(part.outer);
+        for (final List<LatLng> hole in part.holes) {
+          allPoints.addAll(hole);
+        }
         polygons.add(
           Polygon(
-            points: ring,
+            points: part.outer,
+            holePointsList: part.holes,
             color: MapColors.fill(zone.changeClass, widget.result.analysisType),
             borderColor: MapColors.stroke(
               zone.changeClass,
@@ -452,14 +502,14 @@ class _MapViewState extends State<MapView> {
           ),
         ],
       ),
-      child: const Row(
+      child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Icon(Icons.layers_outlined, size: 16, color: AppColors.primary),
-          SizedBox(width: 6),
+          const Icon(Icons.layers_outlined, size: 16, color: AppColors.primary),
+          const SizedBox(width: 6),
           Text(
-            'Анализ растительности',
-            style: TextStyle(
+            widget.result.scenarioTitle,
+            style: const TextStyle(
               fontSize: 12,
               fontWeight: FontWeight.w600,
               color: AppColors.text,

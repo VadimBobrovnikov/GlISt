@@ -109,6 +109,23 @@ def test_write_export_file_creates_both_formats(tmp_path: Path) -> None:
     json.loads(geojson_path.read_text(encoding="utf-8"))
 
 
+def test_export_data_reports_scenario_title_and_labels() -> None:
+    """PDF/GeoJSON обязаны называть сценарий и его классы (регрессия @property)."""
+    base = _data()
+    flood = ExportData(
+        run_id=base.run_id,
+        result=base.result,
+        zones=base.zones,
+        diagnostics=base.diagnostics,
+        analysis_type="flood_extent",
+    )
+
+    assert flood.scenario_title == "Зоны затопления"
+    assert flood.scenario_labels["new"] == "Временное затопление"
+    assert build_pdf(flood).startswith(b"%PDF")
+    assert build_geojson(flood)["features"][0]["properties"]["change_class"] == "lost"
+
+
 def test_format_area_does_not_round_small_nonzero_to_zero() -> None:
     assert format_area_km2(0.0022) == "2200 м²"
     assert format_area_km2(0.0004) == "400 м²"
