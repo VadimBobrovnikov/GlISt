@@ -75,6 +75,27 @@ class ApiClient {
         : <String, dynamic>{};
   }
 
+  /// Определение сценария по тексту запроса (до выбора территории).
+  ///
+  /// Возвращает `analysisType`, `label`, `confidence`, `candidates`,
+  /// `ambiguous`; при сбое сети возвращает `null`, и вызывающий код не меняет
+  /// выбранный сценарий.
+  Future<Map<String, dynamic>?> detectAnalysisType(String text) async {
+    try {
+      final Response<dynamic> response = await _send(
+        () => _dio.post<dynamic>(
+          '/api/v1/analysis-types/detect',
+          data: <String, dynamic>{'text': text},
+          options: Options(receiveTimeout: const Duration(seconds: 30)),
+        ),
+      );
+      final Object? data = response.data;
+      return data is Map<String, dynamic> ? data : null;
+    } on ApiException {
+      return null;
+    }
+  }
+
   /// POST /api/v1/queries — создание запроса и запуска анализа.
   ///
   /// Возвращает [QueryCreated] с запросом и запуском; при необходимости

@@ -136,12 +136,66 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
     }
   }
 
+  /// Сверяет выбранный сценарий с определённым по тексту.
+  ///
+  /// Если текст уверенно указывает на другой сценарий, показывается диалог:
+  /// пользователь решает сам, LLM/эвристика не меняет выбор молча.
+  Future<void> _maybeAdjustScenario(ApiClient client, String text) async {
+    final Map<String, dynamic>? detected = await client.detectAnalysisType(text);
+    if (detected == null) {
+      return;
+    }
+    final AnalysisType? type = AnalysisType.tryFromWire(detected['analysisType']);
+    final Object? rawConfidence = detected['confidence'];
+    final double confidence = rawConfidence is num ? rawConfidence.toDouble() : 0;
+    if (type == null || type == _scenario || confidence < 0.5) {
+      return;
+    }
+    if (!mounted) {
+      return;
+    }
+    final bool? useDetected = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text('Уточните сценарий'),
+        content: Text(
+          'Текст запроса описывает сценарий «${type.label}», а выбран '
+          '«${_scenario.label}». Какой сценарий запустить?',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: Text('Оставить «${_scenario.label}»'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text('Использовать «${type.label}»'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || useDetected != true) {
+      return;
+    }
+    setState(() {
+      _scenario = type;
+    });
+  }
+
   Future<void> _submit() async {
     String text = _controller.text.trim();
     if (text.length < 3) {
       setState(() {
         _error = 'Введите запрос не короче 3 символов';
       });
+      return;
+    }
+    final ApiClient client = ApiScope.of(context);
+    // Сценарий по тексту: подтверждаем до выбора территории, чтобы запрос не
+    // уходил молча в анализ растительности. Сеть недоступна — остаётся выбор
+    // пользователя (карточка или значение по умолчанию).
+    await _maybeAdjustScenario(client, text);
+    if (!mounted) {
       return;
     }
     if (_scenario == AnalysisType.flood && !_eventDatePattern.hasMatch(text)) {
@@ -164,7 +218,6 @@ class _QueryFormScreenState extends State<QueryFormScreen> {
       text = '$text (дата события: $iso)';
       _applyTemplate(text);
     }
-    final ApiClient client = ApiScope.of(context);
     final NavigatorState navigator = Navigator.of(context);
     setState(() {
       _submitting = true;
